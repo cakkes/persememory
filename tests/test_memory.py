@@ -194,3 +194,34 @@ def test_ollama_chat_streams_and_concatenates_content(capsys):
     assert mock_post.call_args.kwargs["json"]["model"] == ochat.CHAT_MODEL
     assert mock_post.call_args.kwargs["json"]["think"] is False
     assert "Hello" in capsys.readouterr().out
+
+
+def test_extract_facts_inserts_new_non_duplicate_facts(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
+         patch("ochat.ollama_chat", return_value='["likes terse answers"]'), \
+         patch("ochat.ollama_embed", return_value=np.array([1.0, 0.0], dtype=np.float32)):
+        ochat.extract_facts(conn, "be brief please", "ok, will do", "default")
+    facts = ochat.get_all_facts(conn)
+    assert len(facts) == 1
+    assert facts[0]["text"] == "likes terse answers"
+
+
+def test_extract_facts_skips_duplicate_facts(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    ochat.insert_fact(conn, "likes terse answers", np.array([1.0, 0.0], dtype=np.float32), "default")
+    with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
+         patch("ochat.ollama_chat", return_value='["likes terse answers"]'), \
+         patch("ochat.ollama_embed", return_value=np.array([1.0, 0.0], dtype=np.float32)):
+        ochat.extract_facts(conn, "be brief please", "ok, will do", "default")
+    assert len(ochat.get_all_facts(conn)) == 1
+
+
+def test_extract_facts_never_raises_and_logs_on_failure(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    log_path = tmp_path / "extraction.log"
+    with patch("ochat.EXTRACTION_LOG_PATH", log_path), \
+         patch("ochat.ollama_chat", side_effect=RuntimeError("model unreachable")):
+        ochat.extract_facts(conn, "hi", "hello", "default")  # must not raise
+    assert log_path.exists()
+    assert "model unreachable" in log_path.read_text(encoding="utf-8")

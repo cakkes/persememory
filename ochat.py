@@ -229,3 +229,44 @@ def ollama_chat(messages, think=False, stream_to_stdout=True):
     if stream_to_stdout:
         print()
     return "".join(pieces)
+
+
+EXTRACTION_PROMPT = (
+    "Given this exchange, list any new durable facts or preferences about the "
+    "user worth remembering long-term. Respond with ONLY a JSON array of short "
+    'fact strings, e.g. ["prefers terse answers"]. If nothing is worth '
+    "remembering, respond with []."
+)
+
+
+def log_extraction_error(exc: Exception) -> None:
+    EXTRACTION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(EXTRACTION_LOG_PATH, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now(timezone.utc).isoformat()} {exc!r}\n")
+
+
+def extract_facts(conn, user_message: str, assistant_message: str, source_thread: str) -> None:
+    try:
+        exchange = f"User: {user_message}\nAssistant: {assistant_message}"
+        reply = ollama_chat(
+            [
+                {"role": "system", "content": EXTRACTION_PROMPT},
+                {"role": "user", "content": exchange},
+            ],
+            think=False,
+            stream_to_stdout=False,
+        )
+        candidate_facts = json.loads(reply)
+        if not isinstance(candidate_facts, list):
+            return
+        existing_embeddings = [fact["embedding"] for fact in get_all_facts(conn)]
+        for fact_text in candidate_facts:
+            if not isinstance(fact_text, str) or not fact_text.strip():
+                continue
+            embedding = ollama_embed(fact_text)
+            if is_duplicate_fact(embedding, existing_embeddings):
+                continue
+            insert_fact(conn, fact_text, embedding, source_thread)
+            existing_embeddings.append(embedding)
+    except Exception as exc:  # extraction must never crash the main loop
+        log_extraction_error(exc)
