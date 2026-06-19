@@ -44,3 +44,20 @@ def test_top_k_facts_returns_fewer_than_k_when_few_qualify():
     facts = [_fact(1, "only match", [1.0, 0.0])]
     result = ochat.top_k_facts(query, facts, k=8, min_similarity=0.45)
     assert len(result) == 1
+
+
+def test_is_duplicate_fact_true_when_above_threshold():
+    candidate = np.array([1.0, 0.0], dtype=np.float32)
+    existing = [np.array([0.99, 0.01], dtype=np.float32)]
+    assert ochat.is_duplicate_fact(candidate, existing, threshold=0.92) is True
+
+
+def test_is_duplicate_fact_false_when_below_threshold():
+    candidate = np.array([1.0, 0.0], dtype=np.float32)
+    existing = [np.array([0.5, 0.5], dtype=np.float32)]
+    assert ochat.is_duplicate_fact(candidate, existing, threshold=0.92) is False
+
+
+def test_is_duplicate_fact_false_when_no_existing_facts():
+    candidate = np.array([1.0, 0.0], dtype=np.float32)
+    assert ochat.is_duplicate_fact(candidate, [], threshold=0.92) is False

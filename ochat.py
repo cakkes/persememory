@@ -50,3 +50,10 @@ def top_k_facts(query_embedding, facts, k=RETRIEVAL_TOP_K, min_similarity=RETRIE
             scored.append((similarity, fact))
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [fact for _, fact in scored[:k]]
+
+
+def is_duplicate_fact(candidate_embedding, existing_embeddings, threshold=DEDUP_SIMILARITY_THRESHOLD):
+    for embedding in existing_embeddings:
+        if cosine_similarity(candidate_embedding, embedding) > threshold:
+            return True
+    return False
