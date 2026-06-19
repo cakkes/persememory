@@ -261,6 +261,27 @@ def log_extraction_error(exc: Exception) -> None:
         f.write(f"{datetime.now(timezone.utc).isoformat()} {exc!r}\n")
 
 
+def _extract_json_array(text: str) -> str:
+    """Pull a clean JSON array substring out of model output.
+
+    Models sometimes wrap their JSON reply in markdown code fences or
+    surround it with prose. Strip fences if present, then fall back to
+    slicing between the first '[' and the last ']' so json.loads has a
+    fighting chance.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        return text[start : end + 1]
+    return text
+
+
 def extract_facts(conn, user_message: str, assistant_message: str, source_thread: str) -> None:
     try:
         exchange = f"User: {user_message}\nAssistant: {assistant_message}"
@@ -272,7 +293,7 @@ def extract_facts(conn, user_message: str, assistant_message: str, source_thread
             think=False,
             stream_to_stdout=False,
         )
-        candidate_facts = json.loads(reply)
+        candidate_facts = json.loads(_extract_json_array(reply))
         if not isinstance(candidate_facts, list):
             return
         existing_embeddings = [fact["embedding"] for fact in get_all_facts(conn)]
@@ -299,7 +320,17 @@ def build_system_prompt(relevant_facts):
 def handle_turn(conn, thread, path, user_input, think):
     try:
         query_embedding = ollama_embed(user_input)
+    except requests.RequestException as exc:
+        print(f"\nerror: chat request failed ({exc}); message not saved, try again", file=sys.stderr)
+        return None
+
+    try:
         relevant = top_k_facts(query_embedding, get_all_facts(conn))
+    except Exception as exc:
+        print(f"\nwarning: fact retrieval failed ({exc}); continuing without relevant facts", file=sys.stderr)
+        relevant = []
+
+    try:
         system_prompt = build_system_prompt(relevant)
         window = truncate_messages_to_budget(
             thread["messages"] + [{"role": "user", "content": user_input}]

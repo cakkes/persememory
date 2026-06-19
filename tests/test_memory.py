@@ -240,6 +240,28 @@ def test_extract_facts_never_raises_and_logs_on_failure(tmp_path):
     assert "model unreachable" in log_path.read_text(encoding="utf-8")
 
 
+def test_extract_facts_handles_markdown_fenced_json(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
+         patch("ochat.ollama_chat", return_value='```json\n["likes terse answers"]\n```'), \
+         patch("ochat.ollama_embed", return_value=np.array([1.0, 0.0], dtype=np.float32)):
+        ochat.extract_facts(conn, "be brief please", "ok, will do", "default")
+    facts = ochat.get_all_facts(conn)
+    assert len(facts) == 1
+    assert facts[0]["text"] == "likes terse answers"
+
+
+def test_extract_facts_handles_prose_wrapped_json(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
+         patch("ochat.ollama_chat", return_value='Sure! Here are the facts: ["likes terse answers"]'), \
+         patch("ochat.ollama_embed", return_value=np.array([1.0, 0.0], dtype=np.float32)):
+        ochat.extract_facts(conn, "be brief please", "ok, will do", "default")
+    facts = ochat.get_all_facts(conn)
+    assert len(facts) == 1
+    assert facts[0]["text"] == "likes terse answers"
+
+
 def test_extract_facts_dedupes_within_same_call(tmp_path):
     """Verify that within-call dedup catches near-duplicate facts in the same model response."""
     conn = ochat.init_db(tmp_path / "memory.db")
@@ -280,6 +302,24 @@ def test_handle_turn_returns_none_and_does_not_save_on_request_failure(tmp_path)
     assert result is None
     assert thread["messages"] == []
     assert not path.exists()
+
+
+def test_handle_turn_degrades_gracefully_when_retrieval_fails(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
+         patch("ochat.get_all_facts", side_effect=ochat.sqlite3.Error("disk I/O error")), \
+         patch("ochat.ollama_chat", return_value="hi there"), \
+         patch("ochat.extract_facts") as mock_extract:
+        result = ochat.handle_turn(conn, thread, path, "hello", "off")
+    assert result is not None
+    result.join(timeout=2)
+    assert len(thread["messages"]) == 2
+    assert thread["messages"][0]["content"] == "hello"
+    assert thread["messages"][1]["content"] == "hi there"
+    assert path.exists()
+    mock_extract.assert_called_once()
 
 
 def test_handle_turn_saves_thread_and_starts_extraction_on_success(tmp_path):
