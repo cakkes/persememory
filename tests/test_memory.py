@@ -225,3 +225,20 @@ def test_extract_facts_never_raises_and_logs_on_failure(tmp_path):
         ochat.extract_facts(conn, "hi", "hello", "default")  # must not raise
     assert log_path.exists()
     assert "model unreachable" in log_path.read_text(encoding="utf-8")
+
+
+def test_extract_facts_dedupes_within_same_call(tmp_path):
+    """Verify that within-call dedup catches near-duplicate facts in the same model response."""
+    conn = ochat.init_db(tmp_path / "memory.db")
+    # Model returns two near-duplicate facts in one response
+    with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
+         patch("ochat.ollama_chat", return_value='["likes terse answers", "prefers brief responses"]'), \
+         patch("ochat.ollama_embed", side_effect=[
+             np.array([1.0, 0.0], dtype=np.float32),    # first fact embedding
+             np.array([0.99, 0.01], dtype=np.float32),  # second fact embedding (near-duplicate, > 0.92 similarity)
+         ]):
+        ochat.extract_facts(conn, "be brief please", "ok, will do", "default")
+    # Only the first fact should be inserted; the second is a near-duplicate
+    facts = ochat.get_all_facts(conn)
+    assert len(facts) == 1
+    assert facts[0]["text"] == "likes terse answers"
