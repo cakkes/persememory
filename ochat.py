@@ -270,3 +270,61 @@ def extract_facts(conn, user_message: str, assistant_message: str, source_thread
             existing_embeddings.append(embedding)
     except Exception as exc:  # extraction must never crash the main loop
         log_extraction_error(exc)
+
+
+def build_system_prompt(relevant_facts):
+    base = "You are a helpful assistant talking with the user in their terminal."
+    if not relevant_facts:
+        return base
+    bullets = "\n".join(f"- {fact['text']}" for fact in relevant_facts)
+    return f"{base}\n\nRelevant memory:\n{bullets}"
+
+
+def handle_turn(conn, thread, path, user_input, think):
+    try:
+        query_embedding = ollama_embed(user_input)
+        relevant = top_k_facts(query_embedding, get_all_facts(conn))
+        system_prompt = build_system_prompt(relevant)
+        window = truncate_messages_to_budget(
+            thread["messages"] + [{"role": "user", "content": user_input}]
+        )
+        payload = [{"role": "system", "content": system_prompt}] + window
+        print("ochat> ", end="", flush=True)
+        reply = ollama_chat(payload, think=think_param(think))
+    except requests.RequestException as exc:
+        print(f"\nerror: chat request failed ({exc}); message not saved, try again", file=sys.stderr)
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    thread["messages"].append({"role": "user", "content": user_input, "ts": now})
+    thread["messages"].append({"role": "assistant", "content": reply, "ts": now})
+    save_thread(path, thread)
+    extraction_thread = threading.Thread(
+        target=extract_facts,
+        args=(conn, user_input, reply, thread["name"]),
+        daemon=True,
+    )
+    extraction_thread.start()
+    return extraction_thread
+
+
+def run_chat_loop(thread_name: str, think: str) -> None:
+    check_ollama_ready()
+    conn = init_db(MEMORY_DB_PATH)
+    path = thread_path(thread_name)
+    thread = load_thread(path, thread_name)
+    pending_extraction = None
+    try:
+        while True:
+            try:
+                user_input = input("you> ").strip()
+            except EOFError:
+                print()
+                break
+            if not user_input:
+                continue
+            if pending_extraction is not None:
+                pending_extraction.join(timeout=0)
+            pending_extraction = handle_turn(conn, thread, path, user_input, think)
+    finally:
+        if pending_extraction is not None:
+            pending_extraction.join(timeout=EXTRACTION_JOIN_TIMEOUT_SECONDS)

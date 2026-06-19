@@ -242,3 +242,43 @@ def test_extract_facts_dedupes_within_same_call(tmp_path):
     facts = ochat.get_all_facts(conn)
     assert len(facts) == 1
     assert facts[0]["text"] == "likes terse answers"
+
+
+def test_build_system_prompt_with_no_facts():
+    prompt = ochat.build_system_prompt([])
+    assert "Relevant memory" not in prompt
+
+
+def test_build_system_prompt_includes_fact_bullets():
+    facts = [
+        {"id": 1, "text": "likes terse answers", "embedding": None, "source_thread": "x", "created_at": "t"},
+    ]
+    prompt = ochat.build_system_prompt(facts)
+    assert "Relevant memory" in prompt
+    assert "- likes terse answers" in prompt
+
+
+def test_handle_turn_returns_none_and_does_not_save_on_request_failure(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", side_effect=ochat.requests.RequestException("down")):
+        result = ochat.handle_turn(conn, thread, path, "hello", "off")
+    assert result is None
+    assert thread["messages"] == []
+    assert not path.exists()
+
+
+def test_handle_turn_saves_thread_and_starts_extraction_on_success(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
+         patch("ochat.ollama_chat", return_value="hi there"), \
+         patch("ochat.extract_facts") as mock_extract:
+        result = ochat.handle_turn(conn, thread, path, "hello", "off")
+    assert result is not None
+    result.join(timeout=2)
+    assert len(thread["messages"]) == 2
+    assert path.exists()
+    mock_extract.assert_called_once()
