@@ -587,7 +587,7 @@ def test_think_param_passes_through_level_strings():
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
 Expected: FAIL with `AttributeError: module 'ochat' has no attribute 'think_param'`
 
-- [ ] **Step 3: Implement `think_param` and `check_ollama_ready`**
+- [ ] **Step 3: Implement `think_param` only**
 
 Append to `ochat.py`:
 
@@ -598,31 +598,6 @@ def think_param(level: str):
     if level in ("on", "true"):
         return True
     return level
-
-
-def check_ollama_ready():
-    try:
-        requests.get(f"{OLLAMA_URL}/api/version", timeout=3).raise_for_status()
-    except requests.RequestException:
-        print(
-            f"error: Ollama isn't reachable at {OLLAMA_URL} — start it with `ollama serve`",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    try:
-        tags = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3).json()
-    except requests.RequestException:
-        print("error: failed to query installed Ollama models", file=sys.stderr)
-        sys.exit(1)
-    installed = {model["name"] for model in tags.get("models", [])}
-    missing = [model for model in (CHAT_MODEL, EMBED_MODEL) if model not in installed]
-    for model in missing:
-        print(
-            f"error: required model '{model}' is not installed — run `ollama pull {model}`",
-            file=sys.stderr,
-        )
-    if missing:
-        sys.exit(1)
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
@@ -630,7 +605,7 @@ def check_ollama_ready():
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
 Expected: PASS (17 tests)
 
-- [ ] **Step 5: Write the failing test for `check_ollama_ready` failure paths**
+- [ ] **Step 5: Write the failing tests for `check_ollama_ready`**
 
 Append to `tests/test_memory.py`:
 
@@ -662,14 +637,44 @@ def test_check_ollama_ready_exits_when_model_missing():
 - [ ] **Step 6: Run the test to verify it fails**
 
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
-Expected: FAIL — `check_ollama_ready` currently calls the real `sys.exit`, so without the patch in place this would raise `requests.RequestException` instead of being caught (confirms the test exercises real behavior). With the implementation from Step 3 already in place, this actually PASSES immediately since the try/except + `sys.exit` call already exist. Treat this as a regression-protection test rather than a red/green cycle, and proceed to Step 7.
+Expected: FAIL with `AttributeError: module 'ochat' has no attribute 'check_ollama_ready'`
 
-- [ ] **Step 7: Run the test to verify it passes**
+- [ ] **Step 7: Implement `check_ollama_ready`**
+
+Append to `ochat.py`:
+
+```python
+def check_ollama_ready():
+    try:
+        requests.get(f"{OLLAMA_URL}/api/version", timeout=3).raise_for_status()
+    except requests.RequestException:
+        print(
+            f"error: Ollama isn't reachable at {OLLAMA_URL} — start it with `ollama serve`",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        tags = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3).json()
+    except requests.RequestException:
+        print("error: failed to query installed Ollama models", file=sys.stderr)
+        sys.exit(1)
+    installed = {model["name"] for model in tags.get("models", [])}
+    missing = [model for model in (CHAT_MODEL, EMBED_MODEL) if model not in installed]
+    for model in missing:
+        print(
+            f"error: required model '{model}' is not installed — run `ollama pull {model}`",
+            file=sys.stderr,
+        )
+    if missing:
+        sys.exit(1)
+```
+
+- [ ] **Step 8: Run the test to verify it passes**
 
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
 Expected: PASS (19 tests)
 
-- [ ] **Step 8: Write the failing test for `ollama_embed`**
+- [ ] **Step 9: Write the failing test for `ollama_embed`**
 
 Append to `tests/test_memory.py`:
 
@@ -686,12 +691,12 @@ def test_ollama_embed_returns_numpy_array():
     assert mock_post.call_args.kwargs["json"]["model"] == ochat.EMBED_MODEL
 ```
 
-- [ ] **Step 9: Run the test to verify it fails**
+- [ ] **Step 10: Run the test to verify it fails**
 
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
 Expected: FAIL with `AttributeError: module 'ochat' has no attribute 'ollama_embed'`
 
-- [ ] **Step 10: Implement `ollama_embed` and `ollama_chat`**
+- [ ] **Step 11: Implement `ollama_embed`**
 
 Append to `ochat.py`:
 
@@ -704,8 +709,44 @@ def ollama_embed(text: str) -> np.ndarray:
     )
     response.raise_for_status()
     return np.array(response.json()["embedding"], dtype=np.float32)
+```
 
+- [ ] **Step 12: Run the test to verify it passes**
 
+Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
+Expected: PASS (20 tests)
+
+- [ ] **Step 13: Write the failing test for `ollama_chat`**
+
+`ollama_chat` is the one function every later task (extraction, the main loop) only ever consumes through a mock — this test is the sole place its actual NDJSON-streaming/parsing logic gets exercised. Append to `tests/test_memory.py`:
+
+```python
+def test_ollama_chat_streams_and_concatenates_content(capsys):
+    fake_response = MagicMock()
+    fake_response.raise_for_status.return_value = None
+    fake_response.iter_lines.return_value = [
+        json.dumps({"message": {"content": "Hel"}, "done": False}).encode(),
+        json.dumps({"message": {"content": "lo"}, "done": False}).encode(),
+        json.dumps({"message": {"content": ""}, "done": True}).encode(),
+    ]
+    with patch("ochat.requests.post", return_value=fake_response) as mock_post:
+        result = ochat.ollama_chat([{"role": "user", "content": "hi"}], think=False, stream_to_stdout=True)
+    assert result == "Hello"
+    assert mock_post.call_args.kwargs["json"]["model"] == ochat.CHAT_MODEL
+    assert mock_post.call_args.kwargs["json"]["think"] is False
+    assert "Hello" in capsys.readouterr().out
+```
+
+- [ ] **Step 14: Run the test to verify it fails**
+
+Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
+Expected: FAIL with `AttributeError: module 'ochat' has no attribute 'ollama_chat'`
+
+- [ ] **Step 15: Implement `ollama_chat`**
+
+Append to `ochat.py`:
+
+```python
 def ollama_chat(messages, think=False, stream_to_stdout=True):
     response = requests.post(
         f"{OLLAMA_URL}/api/chat",
@@ -731,12 +772,12 @@ def ollama_chat(messages, think=False, stream_to_stdout=True):
     return "".join(pieces)
 ```
 
-- [ ] **Step 11: Run the test to verify it passes**
+- [ ] **Step 16: Run the test to verify it passes**
 
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
-Expected: PASS (20 tests)
+Expected: PASS (21 tests)
 
-- [ ] **Step 12: Commit**
+- [ ] **Step 17: Commit**
 
 ```bash
 cd /Users/developer/ochat
@@ -847,7 +888,7 @@ def extract_facts(conn, user_message: str, assistant_message: str, source_thread
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
-Expected: PASS (23 tests)
+Expected: PASS (24 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -989,7 +1030,7 @@ def run_chat_loop(thread_name: str, think: str) -> None:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
-Expected: PASS (27 tests)
+Expected: PASS (28 tests)
 
 - [ ] **Step 5: Manual check that the loop starts and exits cleanly**
 
@@ -1102,7 +1143,7 @@ Run: `rm -rf /tmp/ochat-manual-check`
 - [ ] **Step 6: Run the full test suite once more**
 
 Run: `uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v`
-Expected: PASS (27 tests)
+Expected: PASS (28 tests)
 
 - [ ] **Step 7: Commit**
 
