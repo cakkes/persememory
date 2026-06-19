@@ -61,3 +61,23 @@ def test_is_duplicate_fact_false_when_below_threshold():
 def test_is_duplicate_fact_false_when_no_existing_facts():
     candidate = np.array([1.0, 0.0], dtype=np.float32)
     assert ochat.is_duplicate_fact(candidate, [], threshold=0.92) is False
+
+
+def test_estimate_tokens_uses_four_chars_per_token():
+    assert ochat.estimate_tokens("a" * 40) == 10
+
+
+def test_truncate_messages_to_budget_keeps_most_recent_within_budget():
+    messages = [
+        {"role": "user", "content": "a" * 40},   # ~10 tokens
+        {"role": "assistant", "content": "b" * 40},  # ~10 tokens
+        {"role": "user", "content": "c" * 40},    # ~10 tokens
+    ]
+    result = ochat.truncate_messages_to_budget(messages, budget_tokens=25)
+    assert [m["content"][0] for m in result] == ["b", "c"]
+
+
+def test_truncate_messages_to_budget_always_keeps_newest_message():
+    messages = [{"role": "user", "content": "x" * 1000}]
+    result = ochat.truncate_messages_to_budget(messages, budget_tokens=1)
+    assert len(result) == 1

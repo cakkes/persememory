@@ -57,3 +57,20 @@ def is_duplicate_fact(candidate_embedding, existing_embeddings, threshold=DEDUP_
         if cosine_similarity(candidate_embedding, embedding) > threshold:
             return True
     return False
+
+
+def estimate_tokens(text: str) -> int:
+    return max(1, len(text) // CHARS_PER_TOKEN)
+
+
+def truncate_messages_to_budget(messages, budget_tokens=CONTEXT_TOKEN_BUDGET):
+    selected = []
+    used = 0
+    for message in reversed(messages):
+        cost = estimate_tokens(message["content"])
+        if selected and used + cost > budget_tokens:
+            break
+        selected.append(message)
+        used += cost
+    selected.reverse()
+    return selected
