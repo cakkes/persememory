@@ -74,3 +74,36 @@ def truncate_messages_to_budget(messages, budget_tokens=CONTEXT_TOKEN_BUDGET):
         used += cost
     selected.reverse()
     return selected
+
+
+def thread_path(name: str) -> Path:
+    return THREADS_DIR / f"{name}.json"
+
+
+def load_thread(path: Path, name: str) -> dict:
+    if not path.exists():
+        return {"name": name, "messages": []}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict) or "messages" not in data:
+            raise ValueError("missing 'messages' key")
+        return data
+    except (json.JSONDecodeError, ValueError) as exc:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        corrupt_path = path.with_name(f"{path.name}.corrupt-{timestamp}")
+        path.rename(corrupt_path)
+        print(
+            f"warning: {path.name} was corrupt ({exc}); moved to "
+            f"{corrupt_path.name} and starting a fresh thread",
+            file=sys.stderr,
+        )
+        return {"name": name, "messages": []}
+
+
+def save_thread(path: Path, thread: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(thread, f, indent=2)
+    os.replace(tmp_path, path)

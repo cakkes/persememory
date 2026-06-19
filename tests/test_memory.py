@@ -81,3 +81,30 @@ def test_truncate_messages_to_budget_always_keeps_newest_message():
     messages = [{"role": "user", "content": "x" * 1000}]
     result = ochat.truncate_messages_to_budget(messages, budget_tokens=1)
     assert len(result) == 1
+
+
+import json
+
+
+def test_load_thread_returns_fresh_thread_when_file_missing(tmp_path):
+    path = tmp_path / "missing.json"
+    thread = ochat.load_thread(path, "missing")
+    assert thread == {"name": "missing", "messages": []}
+
+
+def test_save_then_load_thread_round_trips(tmp_path):
+    path = tmp_path / "work.json"
+    thread = {"name": "work", "messages": [{"role": "user", "content": "hi", "ts": "t1"}]}
+    ochat.save_thread(path, thread)
+    loaded = ochat.load_thread(path, "work")
+    assert loaded == thread
+
+
+def test_load_thread_recovers_from_corrupt_file(tmp_path, capsys):
+    path = tmp_path / "broken.json"
+    path.write_text("{not valid json", encoding="utf-8")
+    thread = ochat.load_thread(path, "broken")
+    assert thread == {"name": "broken", "messages": []}
+    corrupt_files = list(tmp_path.glob("broken.json.corrupt-*"))
+    assert len(corrupt_files) == 1
+    assert "corrupt" in capsys.readouterr().err
