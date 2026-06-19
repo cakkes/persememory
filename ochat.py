@@ -171,6 +171,22 @@ def think_param(level: str):
     return level
 
 
+def _model_installed(required: str, installed_names: set[str]) -> bool:
+    """Check whether a required model name is satisfied by the installed set.
+
+    Ollama reports installed models with an explicit tag (e.g. pulling
+    "nomic-embed-text" with no tag gets reported back as
+    "nomic-embed-text:latest"). A required name with no tag should match
+    any tagged variant of that same base name; a required name that already
+    specifies a tag must match that exact tag.
+    """
+    if required in installed_names:
+        return True
+    if ":" not in required:
+        return any(name.startswith(f"{required}:") for name in installed_names)
+    return False
+
+
 def check_ollama_ready():
     try:
         requests.get(f"{OLLAMA_URL}/api/version", timeout=3).raise_for_status()
@@ -186,7 +202,7 @@ def check_ollama_ready():
         print("error: failed to query installed Ollama models", file=sys.stderr)
         sys.exit(1)
     installed = {model["name"] for model in tags.get("models", [])}
-    missing = [model for model in (CHAT_MODEL, EMBED_MODEL) if model not in installed]
+    missing = [model for model in (CHAT_MODEL, EMBED_MODEL) if not _model_installed(model, installed)]
     for model in missing:
         print(
             f"error: required model '{model}' is not installed — run `ollama pull {model}`",

@@ -166,6 +166,19 @@ def test_check_ollama_ready_exits_when_model_missing():
             mock_exit.assert_called_with(1)
 
 
+def test_check_ollama_ready_succeeds_when_model_installed_with_default_latest_tag():
+    version_response = MagicMock()
+    version_response.raise_for_status.return_value = None
+    tags_response = MagicMock()
+    tags_response.json.return_value = {
+        "models": [{"name": "gemma4:12b"}, {"name": "nomic-embed-text:latest"}]
+    }
+    with patch("ochat.requests.get", side_effect=[version_response, tags_response]):
+        with patch("ochat.sys.exit") as mock_exit:
+            ochat.check_ollama_ready()
+            mock_exit.assert_not_called()
+
+
 def test_ollama_embed_returns_numpy_array():
     fake_response = MagicMock()
     fake_response.json.return_value = {"embedding": [0.1, 0.2, 0.3]}
