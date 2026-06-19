@@ -128,3 +128,66 @@ def test_delete_fact_removes_row_and_reports_success(tmp_path):
     assert ochat.delete_fact(conn, fact_id) is True
     assert ochat.get_all_facts(conn) == []
     assert ochat.delete_fact(conn, fact_id) is False
+
+
+from unittest.mock import MagicMock, patch
+
+
+def test_think_param_off_is_false():
+    assert ochat.think_param("off") is False
+
+
+def test_think_param_passes_through_level_strings():
+    assert ochat.think_param("medium") == "medium"
+
+
+def test_check_ollama_ready_exits_when_unreachable():
+    with patch("ochat.requests.get", side_effect=ochat.requests.RequestException("down")):
+        with patch("ochat.sys.exit", side_effect=SystemExit) as mock_exit:
+            try:
+                ochat.check_ollama_ready()
+            except SystemExit:
+                pass
+            mock_exit.assert_called_with(1)
+
+
+def test_check_ollama_ready_exits_when_model_missing():
+    version_response = MagicMock()
+    version_response.raise_for_status.return_value = None
+    tags_response = MagicMock()
+    tags_response.json.return_value = {"models": [{"name": "gemma4:12b"}]}
+    with patch("ochat.requests.get", side_effect=[version_response, tags_response]):
+        with patch("ochat.sys.exit", side_effect=SystemExit) as mock_exit:
+            try:
+                ochat.check_ollama_ready()
+            except SystemExit:
+                pass
+            mock_exit.assert_called_with(1)
+
+
+def test_ollama_embed_returns_numpy_array():
+    fake_response = MagicMock()
+    fake_response.json.return_value = {"embedding": [0.1, 0.2, 0.3]}
+    fake_response.raise_for_status.return_value = None
+    with patch("ochat.requests.post", return_value=fake_response) as mock_post:
+        result = ochat.ollama_embed("hello")
+    assert isinstance(result, np.ndarray)
+    assert np.allclose(result, [0.1, 0.2, 0.3])
+    mock_post.assert_called_once()
+    assert mock_post.call_args.kwargs["json"]["model"] == ochat.EMBED_MODEL
+
+
+def test_ollama_chat_streams_and_concatenates_content(capsys):
+    fake_response = MagicMock()
+    fake_response.raise_for_status.return_value = None
+    fake_response.iter_lines.return_value = [
+        json.dumps({"message": {"content": "Hel"}, "done": False}).encode(),
+        json.dumps({"message": {"content": "lo"}, "done": False}).encode(),
+        json.dumps({"message": {"content": ""}, "done": True}).encode(),
+    ]
+    with patch("ochat.requests.post", return_value=fake_response) as mock_post:
+        result = ochat.ollama_chat([{"role": "user", "content": "hi"}], think=False, stream_to_stdout=True)
+    assert result == "Hello"
+    assert mock_post.call_args.kwargs["json"]["model"] == ochat.CHAT_MODEL
+    assert mock_post.call_args.kwargs["json"]["think"] is False
+    assert "Hello" in capsys.readouterr().out

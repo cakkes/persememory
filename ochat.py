@@ -161,3 +161,71 @@ def delete_fact(conn, fact_id):
     cursor = conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
     conn.commit()
     return cursor.rowcount > 0
+
+
+def think_param(level: str):
+    if level == "off":
+        return False
+    if level in ("on", "true"):
+        return True
+    return level
+
+
+def check_ollama_ready():
+    try:
+        requests.get(f"{OLLAMA_URL}/api/version", timeout=3).raise_for_status()
+    except requests.RequestException:
+        print(
+            f"error: Ollama isn't reachable at {OLLAMA_URL} — start it with `ollama serve`",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    try:
+        tags = requests.get(f"{OLLAMA_URL}/api/tags", timeout=3).json()
+    except requests.RequestException:
+        print("error: failed to query installed Ollama models", file=sys.stderr)
+        sys.exit(1)
+    installed = {model["name"] for model in tags.get("models", [])}
+    missing = [model for model in (CHAT_MODEL, EMBED_MODEL) if model not in installed]
+    for model in missing:
+        print(
+            f"error: required model '{model}' is not installed — run `ollama pull {model}`",
+            file=sys.stderr,
+        )
+    if missing:
+        sys.exit(1)
+
+
+def ollama_embed(text: str) -> np.ndarray:
+    response = requests.post(
+        f"{OLLAMA_URL}/api/embeddings",
+        json={"model": EMBED_MODEL, "prompt": text},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return np.array(response.json()["embedding"], dtype=np.float32)
+
+
+def ollama_chat(messages, think=False, stream_to_stdout=True):
+    response = requests.post(
+        f"{OLLAMA_URL}/api/chat",
+        json={"model": CHAT_MODEL, "messages": messages, "stream": True, "think": think},
+        stream=True,
+        timeout=120,
+    )
+    response.raise_for_status()
+    pieces = []
+    for line in response.iter_lines():
+        if not line:
+            continue
+        chunk = json.loads(line)
+        piece = chunk.get("message", {}).get("content", "")
+        if piece:
+            pieces.append(piece)
+            if stream_to_stdout:
+                print(piece, end="", flush=True)
+        if chunk.get("done"):
+            break
+    if stream_to_stdout:
+        print()
+    return "".join(pieces)
