@@ -142,13 +142,14 @@ def test_think_param_passes_through_level_strings():
 
 
 def test_check_ollama_ready_exits_when_unreachable():
-    with patch("ochat.requests.get", side_effect=ochat.requests.RequestException("down")):
+    with patch("ochat.requests.get", side_effect=ochat.requests.RequestException("down")) as mock_get:
         with patch("ochat.sys.exit", side_effect=SystemExit) as mock_exit:
             try:
                 ochat.check_ollama_ready()
             except SystemExit:
                 pass
             mock_exit.assert_called_with(1)
+            mock_get.assert_called_once()
 
 
 def test_check_ollama_ready_exits_when_model_missing():
@@ -184,10 +185,12 @@ def test_ollama_chat_streams_and_concatenates_content(capsys):
         json.dumps({"message": {"content": "Hel"}, "done": False}).encode(),
         json.dumps({"message": {"content": "lo"}, "done": False}).encode(),
         json.dumps({"message": {"content": ""}, "done": True}).encode(),
+        json.dumps({"message": {"content": "EXTRA"}, "done": False}).encode(),
     ]
     with patch("ochat.requests.post", return_value=fake_response) as mock_post:
         result = ochat.ollama_chat([{"role": "user", "content": "hi"}], think=False, stream_to_stdout=True)
     assert result == "Hello"
+    assert "EXTRA" not in result
     assert mock_post.call_args.kwargs["json"]["model"] == ochat.CHAT_MODEL
     assert mock_post.call_args.kwargs["json"]["think"] is False
     assert "Hello" in capsys.readouterr().out
