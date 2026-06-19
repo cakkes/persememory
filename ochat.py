@@ -328,3 +328,63 @@ def run_chat_loop(thread_name: str, think: str) -> None:
     finally:
         if pending_extraction is not None:
             pending_extraction.join(timeout=EXTRACTION_JOIN_TIMEOUT_SECONDS)
+
+
+def cmd_threads() -> None:
+    if not THREADS_DIR.exists() or not any(THREADS_DIR.glob("*.json")):
+        print("no threads yet")
+        return
+    for path in sorted(THREADS_DIR.glob("*.json")):
+        thread = load_thread(path, path.stem)
+        modified = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).isoformat()
+        print(f"{path.stem}\t{len(thread['messages'])} messages\tlast updated {modified}")
+
+
+def cmd_memory_list() -> None:
+    conn = init_db(MEMORY_DB_PATH)
+    facts = get_all_facts(conn)
+    if not facts:
+        print("no facts stored yet")
+        return
+    for fact in facts:
+        print(f"[{fact['id']}] {fact['text']}  (from '{fact['source_thread']}', {fact['created_at']})")
+
+
+def cmd_memory_forget(fact_id: int) -> None:
+    conn = init_db(MEMORY_DB_PATH)
+    if delete_fact(conn, fact_id):
+        print(f"deleted fact {fact_id}")
+    else:
+        print(f"no fact with id {fact_id}", file=sys.stderr)
+        sys.exit(1)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="ochat")
+    parser.add_argument("--thread", default="default")
+    parser.add_argument("--think", default=DEFAULT_THINK)
+    subparsers = parser.add_subparsers(dest="command")
+    subparsers.add_parser("threads")
+    memory_parser = subparsers.add_parser("memory")
+    memory_sub = memory_parser.add_subparsers(dest="memory_command")
+    memory_sub.add_parser("list")
+    forget_parser = memory_sub.add_parser("forget")
+    forget_parser.add_argument("fact_id", type=int)
+
+    args = parser.parse_args()
+
+    if args.command == "threads":
+        cmd_threads()
+    elif args.command == "memory":
+        if args.memory_command == "list":
+            cmd_memory_list()
+        elif args.memory_command == "forget":
+            cmd_memory_forget(args.fact_id)
+        else:
+            memory_parser.print_help()
+    else:
+        run_chat_loop(args.thread, args.think)
+
+
+if __name__ == "__main__":
+    main()
