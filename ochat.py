@@ -107,3 +107,57 @@ def save_thread(path: Path, thread: dict) -> None:
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(thread, f, indent=2)
     os.replace(tmp_path, path)
+
+
+def init_db(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS facts (
+            id INTEGER PRIMARY KEY,
+            text TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            source_thread TEXT,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+    return conn
+
+
+def insert_fact(conn, text, embedding, source_thread):
+    conn.execute(
+        "INSERT INTO facts (text, embedding, source_thread, created_at) VALUES (?, ?, ?, ?)",
+        (
+            text,
+            np.asarray(embedding, dtype=np.float32).tobytes(),
+            source_thread,
+            datetime.now(timezone.utc).isoformat(),
+        ),
+    )
+    conn.commit()
+
+
+def get_all_facts(conn):
+    rows = conn.execute(
+        "SELECT id, text, embedding, source_thread, created_at FROM facts"
+    ).fetchall()
+    return [
+        {
+            "id": row[0],
+            "text": row[1],
+            "embedding": np.frombuffer(row[2], dtype=np.float32),
+            "source_thread": row[3],
+            "created_at": row[4],
+        }
+        for row in rows
+    ]
+
+
+def delete_fact(conn, fact_id):
+    cursor = conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+    conn.commit()
+    return cursor.rowcount > 0

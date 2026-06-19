@@ -108,3 +108,23 @@ def test_load_thread_recovers_from_corrupt_file(tmp_path, capsys):
     corrupt_files = list(tmp_path.glob("broken.json.corrupt-*"))
     assert len(corrupt_files) == 1
     assert "corrupt" in capsys.readouterr().err
+
+
+def test_insert_and_get_all_facts_round_trips(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    embedding = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+    ochat.insert_fact(conn, "likes terse answers", embedding, "default")
+    facts = ochat.get_all_facts(conn)
+    assert len(facts) == 1
+    assert facts[0]["text"] == "likes terse answers"
+    assert facts[0]["source_thread"] == "default"
+    assert np.allclose(facts[0]["embedding"], embedding)
+
+
+def test_delete_fact_removes_row_and_reports_success(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    ochat.insert_fact(conn, "fact one", np.array([1.0], dtype=np.float32), "default")
+    fact_id = ochat.get_all_facts(conn)[0]["id"]
+    assert ochat.delete_fact(conn, fact_id) is True
+    assert ochat.get_all_facts(conn) == []
+    assert ochat.delete_fact(conn, fact_id) is False
