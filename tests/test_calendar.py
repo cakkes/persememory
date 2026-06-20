@@ -1,0 +1,15 @@
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import ochat
+
+
+def test_current_datetime_context_formats_local_time():
+    fixed = datetime(2026, 6, 20, 18, 51, tzinfo=timezone(timedelta(hours=-7)))
+    with patch("ochat.datetime") as mock_datetime:
+        mock_datetime.now.return_value.astimezone.return_value = fixed
+        result = ochat.current_datetime_context()
+    assert result == "Current date/time: Saturday, June 20, 2026, 06:51 PM UTC-07:00"

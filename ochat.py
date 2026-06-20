@@ -76,6 +76,11 @@ def truncate_messages_to_budget(messages, budget_tokens=CONTEXT_TOKEN_BUDGET):
     return selected
 
 
+def current_datetime_context() -> str:
+    now = datetime.now().astimezone()
+    return f"Current date/time: {now.strftime('%A, %B %d, %Y, %I:%M %p %Z')}"
+
+
 def thread_path(name: str) -> Path:
     return THREADS_DIR / f"{name}.json"
 
