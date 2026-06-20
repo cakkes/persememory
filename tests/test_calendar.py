@@ -182,3 +182,42 @@ def test_create_event_raises_calendar_error_on_applescript_failure():
             assert False, "expected CalendarError"
         except ochat_calendar.CalendarError:
             pass
+
+
+def test_format_applescript_date_setup_sets_fields_in_safe_order():
+    when = datetime(2026, 2, 25, 14, 30)
+    script = ochat_calendar._format_applescript_date_setup("startDate", when)
+    reset_idx = script.index("set day of startDate to 1\n")
+    year_idx = script.index("set year of startDate to 2026")
+    month_idx = script.index("set month of startDate to 2")
+    real_day_idx = script.index("set day of startDate to 25")
+    hours_idx = script.index("set hours of startDate to 14")
+    minutes_idx = script.index("set minutes of startDate to 30")
+    assert reset_idx < year_idx < month_idx < real_day_idx < hours_idx < minutes_idx
+
+
+def test_create_event_includes_notes_in_script():
+    start = datetime(2026, 6, 25, 14, 0)
+    end = datetime(2026, 6, 25, 14, 30)
+    with patch("ochat_calendar._run_applescript", return_value="") as mock_run:
+        ochat_calendar.create_event("Dentist", start, end, notes="Bring insurance card", timeout=10)
+    script = mock_run.call_args.args[0]
+    assert 'description:"Bring insurance card"' in script
+
+
+def test_create_event_escapes_quotes_in_notes():
+    start = datetime(2026, 6, 25, 14, 0)
+    end = datetime(2026, 6, 25, 14, 30)
+    with patch("ochat_calendar._run_applescript", return_value="") as mock_run:
+        ochat_calendar.create_event("Dentist", start, end, notes='Bring "insurance" card', timeout=10)
+    script = mock_run.call_args.args[0]
+    assert 'description:"Bring \\"insurance\\" card"' in script
+
+
+def test_create_event_with_none_notes_produces_empty_description():
+    start = datetime(2026, 6, 25, 14, 0)
+    end = datetime(2026, 6, 25, 14, 30)
+    with patch("ochat_calendar._run_applescript", return_value="") as mock_run:
+        ochat_calendar.create_event("Dentist", start, end, notes=None, timeout=10)
+    script = mock_run.call_args.args[0]
+    assert 'description:""' in script
