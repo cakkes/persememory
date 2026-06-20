@@ -221,3 +221,18 @@ def test_create_event_with_none_notes_produces_empty_description():
         ochat_calendar.create_event("Dentist", start, end, notes=None, timeout=10)
     script = mock_run.call_args.args[0]
     assert 'description:""' in script
+
+
+def test_extract_json_object_strips_markdown_fence():
+    text = '```json\n{"intent": "create"}\n```'
+    assert ochat._extract_json_object(text) == '{"intent": "create"}'
+
+
+def test_extract_json_object_handles_prose_wrapped_json():
+    text = 'Sure, here it is: {"intent": "query"} -- done'
+    assert ochat._extract_json_object(text) == '{"intent": "query"}'
+
+
+def test_extract_json_array_unchanged_behavior():
+    text = '```json\n["fact one"]\n```'
+    assert ochat._extract_json_array(text) == '["fact one"]'

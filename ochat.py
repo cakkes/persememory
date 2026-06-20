@@ -278,13 +278,13 @@ def log_extraction_error(exc: Exception) -> None:
         f.write(f"{datetime.now(timezone.utc).isoformat()} {exc!r}\n")
 
 
-def _extract_json_array(text: str) -> str:
-    """Pull a clean JSON array substring out of model output.
+def _extract_json_substring(text: str, open_char: str, close_char: str) -> str:
+    """Pull a clean JSON substring out of model output.
 
     Models sometimes wrap their JSON reply in markdown code fences or
     surround it with prose. Strip fences if present, then fall back to
-    slicing between the first '[' and the last ']' so json.loads has a
-    fighting chance.
+    slicing between the first opening char and the last closing char so
+    json.loads has a fighting chance.
     """
     text = text.strip()
     if text.startswith("```"):
@@ -292,11 +292,19 @@ def _extract_json_array(text: str) -> str:
         if text.lower().startswith("json"):
             text = text[4:]
         text = text.strip()
-    start = text.find("[")
-    end = text.rfind("]")
+    start = text.find(open_char)
+    end = text.rfind(close_char)
     if start != -1 and end != -1 and end > start:
         return text[start : end + 1]
     return text
+
+
+def _extract_json_array(text: str) -> str:
+    return _extract_json_substring(text, "[", "]")
+
+
+def _extract_json_object(text: str) -> str:
+    return _extract_json_substring(text, "{", "}")
 
 
 def extract_facts(conn, user_message: str, assistant_message: str, source_thread: str) -> None:
