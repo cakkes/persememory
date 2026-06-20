@@ -495,6 +495,7 @@ def run_chat_loop(thread_name: str, think: str) -> None:
     conn = init_db(MEMORY_DB_PATH)
     path = thread_path(thread_name)
     thread = load_thread(path, thread_name)
+    calendar_cache = {"events": [], "fetched_at": None}
     pending_extraction = None
     try:
         while True:
@@ -507,7 +508,7 @@ def run_chat_loop(thread_name: str, think: str) -> None:
                 continue
             if pending_extraction is not None:
                 pending_extraction.join(timeout=0)
-            pending_extraction = handle_turn(conn, thread, path, user_input, think)
+            pending_extraction = handle_turn(conn, thread, path, user_input, think, calendar_cache)
     finally:
         if pending_extraction is not None:
             pending_extraction.join(timeout=EXTRACTION_JOIN_TIMEOUT_SECONDS)
