@@ -376,12 +376,20 @@ def extract_facts(conn, user_message: str, assistant_message: str, source_thread
         log_extraction_error(exc)
 
 
-def build_system_prompt(relevant_facts):
-    base = "You are a helpful assistant talking with the user in their terminal."
-    if not relevant_facts:
-        return base
-    bullets = "\n".join(f"- {fact['text']}" for fact in relevant_facts)
-    return f"{base}\n\nRelevant memory:\n{bullets}"
+def build_system_prompt(relevant_facts, calendar_events=None):
+    sections = [
+        f"You are a helpful assistant talking with the user in their terminal.\n\n{current_datetime_context()}"
+    ]
+    if relevant_facts:
+        bullets = "\n".join(f"- {fact['text']}" for fact in relevant_facts)
+        sections.append(f"Relevant memory:\n{bullets}")
+    if calendar_events:
+        bullets = "\n".join(
+            f"- {event['title']} ({event['start']} to {event['end']}, {event['calendar']})"
+            for event in calendar_events
+        )
+        sections.append(f"Upcoming calendar events:\n{bullets}")
+    return "\n\n".join(sections)
 
 
 def handle_turn(conn, thread, path, user_input, think):

@@ -286,3 +286,20 @@ def test_classify_calendar_intent_passes_now_context_to_system_prompt():
         ochat.classify_calendar_intent("hi", "Current date/time: Saturday, June 20, 2026")
     system_message = mock_chat.call_args.args[0][0]["content"]
     assert "Current date/time: Saturday, June 20, 2026" in system_message
+
+
+def test_build_system_prompt_includes_current_datetime_context():
+    prompt = ochat.build_system_prompt([])
+    assert "Current date/time:" in prompt
+
+
+def test_build_system_prompt_includes_calendar_events_section():
+    events = [{"title": "Standup", "start": "2026-06-21T09:00:00", "end": "2026-06-21T09:15:00", "calendar": "Work"}]
+    prompt = ochat.build_system_prompt([], calendar_events=events)
+    assert "Upcoming calendar events" in prompt
+    assert "Standup" in prompt
+
+
+def test_build_system_prompt_omits_calendar_section_when_no_events():
+    prompt = ochat.build_system_prompt([], calendar_events=[])
+    assert "Upcoming calendar events" not in prompt
