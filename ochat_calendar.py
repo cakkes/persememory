@@ -36,8 +36,8 @@ def _run_applescript(script: str, timeout: float) -> str:
 
 
 def _build_fetch_script(days_ahead: int) -> str:
-    sep = f"(ASCII character 31)"
-    rec = f"(ASCII character 30)"
+    sep = "(ASCII character 31)"
+    rec = "(ASCII character 30)"
     return (
         "set startDate to current date\n"
         f"set endDate to startDate + ({days_ahead} * days)\n"

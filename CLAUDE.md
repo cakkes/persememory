@@ -169,4 +169,9 @@ functions are tested with plain values, storage functions use pytest's
 `tmp_path` fixture (never touch the real `~/.local/share/ochat/`), and all
 Ollama HTTP calls are mocked with `unittest.mock.patch`, asserting on actual
 request payload shape (model name, JSON body, streaming flag), not just that
-a call happened.
+a call happened. `tests/test_calendar.py` follows the same TDD/mocking
+conventions (85 tests: tests/test_memory.py + tests/test_calendar.py): pure
+logic (e.g. `looks_calendar_related`, `current_datetime_context`) is tested
+directly, and `osascript` subprocess calls, `ollama_chat` intent
+classification, and `builtins.input` confirmation prompts are all mocked so
+no real Calendar.app, model, or terminal interaction is required.

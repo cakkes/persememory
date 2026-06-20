@@ -427,9 +427,13 @@ def handle_calendar_create_intent(user_input: str, now_context: str, calendar_ca
         end = datetime.fromisoformat(end_raw)
     except ValueError:
         return
+    if end.date() != start.date():
+        end_part = end.strftime("%a, %b %d %Y, %I:%M %p")
+    else:
+        end_part = end.strftime("%I:%M %p")
     confirm_text = (
         f'Add to calendar? "{title}" -- '
-        f'{start.strftime("%a, %b %d %Y, %I:%M %p")}-{end.strftime("%I:%M %p")} [y/N] '
+        f'{start.strftime("%a, %b %d %Y, %I:%M %p")}-{end_part} [y/N] '
     )
     answer = input(confirm_text).strip().lower()
     if answer not in ("y", "yes"):

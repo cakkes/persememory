@@ -368,6 +368,22 @@ def test_handle_calendar_create_intent_declined_skips_create_event():
     assert cache["events"] == []
 
 
+def test_handle_calendar_create_intent_confirm_text_shows_end_date_for_multi_day_event():
+    cache = {"events": [], "fetched_at": None}
+    intent_response = (
+        '{"intent": "create", "title": "Conference", "start": "2026-06-22T09:00:00", '
+        '"end": "2026-06-24T17:00:00", "notes": null}'
+    )
+    with patch("ochat.ollama_chat", return_value=intent_response), \
+         patch("builtins.input", return_value="n") as mock_input, \
+         patch("ochat.ochat_calendar.create_event") as mock_create:
+        ochat.handle_calendar_create_intent("add a conference mon to wed", "Current date/time: ...", cache)
+    mock_create.assert_not_called()
+    confirm_text = mock_input.call_args.args[0]
+    assert "Mon, Jun 22 2026" in confirm_text
+    assert "Wed, Jun 24 2026" in confirm_text
+
+
 def test_handle_calendar_create_intent_query_does_nothing():
     cache = {"events": [], "fetched_at": None}
     with patch("ochat.ollama_chat", return_value='{"intent": "query", "title": null, "start": null, "end": null, "notes": null}'), \
