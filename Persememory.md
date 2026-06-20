@@ -282,7 +282,7 @@ change any of these:
 | `CALENDAR_ENABLED` | `True` | Master on/off switch for all calendar behavior (see §16) |
 | `CALENDAR_LOOKAHEAD_DAYS` | `7` | How many days ahead `fetch_upcoming_events` looks |
 | `CALENDAR_CACHE_TTL_SECONDS` | `300` | How long a fetched event list is reused before `refresh_calendar_cache` fetches again |
-| `APPLESCRIPT_TIMEOUT_SECONDS` | `10` | Timeout (seconds) for any single `osascript` subprocess call |
+| `APPLESCRIPT_TIMEOUT_SECONDS` | `120` | Timeout (seconds) for any single `osascript` subprocess call. Sized for `fetch_upcoming_events`'s `whose`-filtered scan against real-world calendar volumes (60–90+s observed against ~1,700 events across 14 calendars); `create_event` finishes in well under a second but shares the same constant |
 
 ## 9. CLI Reference
 
@@ -312,21 +312,36 @@ ochat calendar list             # list upcoming events from macOS Calendar.app (
 
 ## 11. Concurrency Model
 
-There is exactly one kind of concurrency in `ochat`: a single daemon
-`threading.Thread` per turn, running `extract_facts`. The SQLite connection
-(`init_db(..., check_same_thread=False)`) is shared between the main thread
-and whichever extraction thread is currently running; WAL mode keeps reads
-and writes from blocking each other. `run_chat_loop` only ever has at most
-one extraction thread alive at a time — a new turn first does a
-non-blocking `join(timeout=0)` to reap the previous one before starting the
-next, and the program's `finally` block gives the very last one up to 5
-seconds to finish before exiting. There is no thread pool, no shared
-mutable state beyond the SQLite connection, and no locking required beyond
-what SQLite's WAL mode already provides.
+There are two independent kinds of background thread in `ochat`, neither of
+which ever blocks the main chat turn or each other:
+
+1. A daemon `threading.Thread` per turn, running `extract_facts`. The
+   SQLite connection (`init_db(..., check_same_thread=False)`) is shared
+   between the main thread and whichever extraction thread is currently
+   running; WAL mode keeps reads and writes from blocking each other.
+   `run_chat_loop` only ever has at most one extraction thread alive at a
+   time — a new turn first does a non-blocking `join(timeout=0)` to reap
+   the previous one before starting the next, and the program's `finally`
+   block gives the very last one up to 5 seconds to finish before exiting.
+2. A daemon `threading.Thread` spawned by `refresh_calendar_cache`
+   (`_run_calendar_refresh`), at most one alive at a time, guarded by a
+   `calendar_cache["refreshing"]` flag rather than a join — `refresh_calendar_cache`
+   itself never blocks, so there's no natural "after the call" point to reap
+   from the way `run_chat_loop` reaps the extraction thread. This thread is
+   fire-and-forget: nothing waits for it on exit (the cache is rebuilt fresh
+   next session anyway), and its handle is stashed at
+   `calendar_cache["_thread"]` purely so tests can join it deterministically.
+   See §16 for why this fetch needs to be backgrounded at all (it can
+   legitimately take 60–90+ seconds against a real-world calendar set).
+
+There is no thread pool, no shared mutable state beyond the SQLite
+connection and the `calendar_cache` dict, and no locking required beyond
+what SQLite's WAL mode already provides and what Python's GIL already
+guarantees for simple dict reads/writes.
 
 ## 12. Testing
 
-85 tests: `tests/test_memory.py` (33) + `tests/test_calendar.py` (52), run via:
+88 tests: `tests/test_memory.py` (33) + `tests/test_calendar.py` (55), run via:
 
 ```bash
 uv run --with pytest --with numpy --with requests pytest tests/ -v
@@ -428,13 +443,13 @@ code decides when and why to call it, the same way it already calls
 |---|---|---|
 | `is_macos()` | `() -> bool` | `platform.system() == "Darwin"` — the single gate every calendar code path checks before doing anything |
 | `CalendarError` | `Exception` subclass | Raised for any `osascript` failure: non-zero exit, timeout, or missing `osascript` binary |
-| `fetch_upcoming_events(days_ahead, timeout)` | `(int, float) -> list[dict]` | Runs one AppleScript that filters every calendar's events by a `whose`-clause date range (`current date` to `current date + days_ahead`), avoiding an unfiltered scan (a known AppleScript Calendar-bridge performance trap). Returns `[{"title", "start" (ISO str), "end" (ISO str), "calendar"}, ...]`. Raises `CalendarError` on failure |
+| `fetch_upcoming_events(days_ahead, timeout)` | `(int, float) -> list[dict]` | Runs one AppleScript that filters every calendar's events by a `whose`-clause date range (`current date` to `current date + days_ahead`). Returns `[{"title", "start" (ISO str), "end" (ISO str), "calendar"}, ...]`. Raises `CalendarError` on failure. **Performance note:** the `whose` clause is *not* a fast native query — Calendar.app's AppleScript bridge evaluates it with one Apple Event round trip per event scanned (~30–60ms each), regardless of whether the event matches. Cost scales with each calendar's total event count, not with match selectivity; an unfiltered bulk-property fetch (`summary`/`start date` of every event, no `whose`) was measured to be no faster — confirmed empirically against a ~1,700-event/14-calendar account, where the full scan took ~80s. There is no AppleScript-level fix for this; see §11 and §16 for how the caller works around it (background refresh + a generous timeout) rather than the script itself |
 | `create_event(title, start, end, notes, timeout)` | `(str, datetime, datetime, str \| None, float) -> None` | Builds an AppleScript that starts from `current date` and overwrites its year/month/day/hour/minute fields individually (avoids AppleScript's locale-dependent date-string parsing), escapes `title`/`notes` for safe interpolation, and creates the event in `calendar 1`. Raises `CalendarError` on failure |
 | `_run_applescript(script, timeout)` | private | Shells out via `subprocess.run(["osascript", "-e", script], ...)`; wraps `TimeoutExpired`/`FileNotFoundError` and any non-zero exit code into `CalendarError` |
 | `_build_fetch_script(days_ahead)` / `_parse_events(raw)` | private | Construct the read AppleScript and parse its output. Fields are delimited with control characters unlikely to appear in real text — `chr(31)` (ASCII unit separator) between fields, `chr(30)` (record separator) between events — written into the script's own output construction rather than relying on AppleScript's native list/record serialization, which is far more fragile to parse from Python |
 | `_escape_applescript_string(value)` / `_format_applescript_date_setup(var_name, when)` | private | Escape `"`/`\` before interpolating a string into generated AppleScript source; emit the `set year of ... / set month of ... / ...` statements used to build a date field-by-field |
 
-### Read path: ambient calendar context with a TTL cache
+### Read path: ambient calendar context with a TTL cache, refreshed in the background
 
 `run_chat_loop` creates one cache dict per process —
 `{"events": [...], "fetched_at": datetime | None}` — and threads it into
@@ -447,7 +462,20 @@ and `ochat_calendar.is_macos()`, `handle_turn` calls
 
 | Function | Purpose |
 |---|---|
-| `refresh_calendar_cache(calendar_cache)` | If `fetched_at` is set and younger than `CALENDAR_CACHE_TTL_SECONDS` (300s), returns the cached `events` list unchanged — no `osascript` call. Otherwise calls `ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)` and updates the cache. Any `CalendarError` is caught, a warning is printed to stderr, and the **last-known cached events** (or an empty list, on a first-ever failure) are returned — this fetch never aborts the turn, mirroring the existing fault-isolated fact-retrieval behavior in §6 |
+| `refresh_calendar_cache(calendar_cache)` | **Never blocks.** Always returns `calendar_cache`'s current `events` list immediately. If `fetched_at` is set and younger than `CALENDAR_CACHE_TTL_SECONDS` (300s), that's just the existing cache — no `osascript` call, same as before. Otherwise, if no refresh is already running (`calendar_cache.get("refreshing")` is falsy), it sets `calendar_cache["refreshing"] = True` and spawns a daemon thread (`_run_calendar_refresh`, handle stashed at `calendar_cache["_thread"]`) that calls `ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)` in the background, updates `events`/`fetched_at` on success (or prints a `CalendarError` warning to stderr and leaves the last-known events in place on failure), and always resets `refreshing` to `False` in a `finally`. The refreshed events become visible starting the *next* turn that calls `refresh_calendar_cache`, not the current one |
+
+This exists because `fetch_upcoming_events` can legitimately take 60–90+
+seconds against a real calendar (see the performance note on
+`fetch_upcoming_events` in §16's function table) — far too long to block an
+interactive chat turn on. Before this, `refresh_calendar_cache` called
+`fetch_upcoming_events` synchronously, so every `CALENDAR_CACHE_TTL_SECONDS`
+window, the *next* user message would silently hang for however long the
+AppleScript scan took. Backgrounding it means the first-ever turn in a
+session has no calendar context (the cache starts empty and the refresh
+hasn't completed yet), but no turn — first or otherwise — ever blocks on it.
+`ochat calendar list` (`cmd_calendar_list`) is unaffected by any of this: it
+bypasses the cache and calls `fetch_upcoming_events` directly, since as a
+deliberate one-off command it's expected to wait for the real answer.
 
 When non-empty, the cached events are rendered as a new optional
 `"Upcoming calendar events:"` bullet section in `build_system_prompt()`

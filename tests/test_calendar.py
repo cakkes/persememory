@@ -1,4 +1,5 @@
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -315,14 +316,26 @@ def test_extract_facts_includes_current_datetime_in_system_prompt(tmp_path):
     assert "Current date/time:" in system_message
 
 
-def test_refresh_calendar_cache_fetches_when_empty():
+def test_refresh_calendar_cache_returns_immediately_and_refreshes_in_background():
     events = [{"title": "Standup", "start": "2026-06-21T09:00:00", "end": "2026-06-21T09:15:00", "calendar": "Work"}]
     cache = {"events": [], "fetched_at": None}
-    with patch("ochat.ochat_calendar.fetch_upcoming_events", return_value=events) as mock_fetch:
+    release_fetch = threading.Event()
+
+    def slow_fetch(days_ahead, timeout):
+        release_fetch.wait(timeout=5)
+        return events
+
+    with patch("ochat.ochat_calendar.fetch_upcoming_events", side_effect=slow_fetch) as mock_fetch:
         result = ochat.refresh_calendar_cache(cache)
-    assert result == events
-    assert cache["events"] == events
+        assert result == []
+        assert cache["refreshing"] is True
+        release_fetch.set()
+        if cache.get("_thread") is not None:
+            cache["_thread"].join(timeout=2)
+
     mock_fetch.assert_called_once()
+    assert cache["events"] == events
+    assert cache["refreshing"] is False
 
 
 def test_refresh_calendar_cache_reuses_fresh_cache():
@@ -333,11 +346,31 @@ def test_refresh_calendar_cache_reuses_fresh_cache():
     mock_fetch.assert_not_called()
 
 
+def test_refresh_calendar_cache_skips_fetch_while_already_refreshing():
+    cache = {"events": [{"title": "cached"}], "fetched_at": None, "refreshing": True}
+    with patch("ochat.ochat_calendar.fetch_upcoming_events") as mock_fetch:
+        result = ochat.refresh_calendar_cache(cache)
+    mock_fetch.assert_not_called()
+    assert result == [{"title": "cached"}]
+
+
 def test_refresh_calendar_cache_keeps_last_known_on_error():
     cache = {"events": [{"title": "stale"}], "fetched_at": None}
-    with patch("ochat.ochat_calendar.fetch_upcoming_events", side_effect=ochat.ochat_calendar.CalendarError("denied")):
+    release_fetch = threading.Event()
+
+    def failing_fetch(days_ahead, timeout):
+        release_fetch.wait(timeout=5)
+        raise ochat.ochat_calendar.CalendarError("denied")
+
+    with patch("ochat.ochat_calendar.fetch_upcoming_events", side_effect=failing_fetch):
         result = ochat.refresh_calendar_cache(cache)
-    assert result == [{"title": "stale"}]
+        assert result == [{"title": "stale"}]
+        release_fetch.set()
+        if cache.get("_thread") is not None:
+            cache["_thread"].join(timeout=2)
+
+    assert cache["events"] == [{"title": "stale"}]
+    assert cache["refreshing"] is False
 
 
 def test_handle_calendar_create_intent_confirmed_calls_create_event():
@@ -421,8 +454,8 @@ def test_handle_turn_includes_calendar_events_in_prompt_when_cache_given(tmp_pat
     conn = ochat.init_db(tmp_path / "memory.db")
     thread = {"name": "t", "messages": []}
     path = tmp_path / "t.json"
-    cache = {"events": [], "fetched_at": None}
     events = [{"title": "Standup", "start": "2026-06-21T09:00:00", "end": "2026-06-21T09:15:00", "calendar": "Work"}]
+    cache = {"events": events, "fetched_at": datetime.now(timezone.utc)}
     captured_payloads = []
 
     def fake_chat(messages, think=False, stream_to_stdout=True):
@@ -430,14 +463,49 @@ def test_handle_turn_includes_calendar_events_in_prompt_when_cache_given(tmp_pat
         return "hi there"
 
     with patch("ochat.ochat_calendar.is_macos", return_value=True), \
-         patch("ochat.ochat_calendar.fetch_upcoming_events", return_value=events), \
+         patch("ochat.ochat_calendar.fetch_upcoming_events") as mock_fetch, \
          patch("ochat.ollama_embed", return_value=__import__("numpy").array([1.0], dtype="float32")), \
          patch("ochat.ollama_chat", side_effect=fake_chat), \
          patch("ochat.extract_facts"):
         result = ochat.handle_turn(conn, thread, path, "what's the weather", "off", cache)
     result.join(timeout=2)
+    mock_fetch.assert_not_called()
     system_message = captured_payloads[0][0]["content"]
     assert "Standup" in system_message
+
+
+def test_handle_turn_does_not_block_chat_on_slow_calendar_fetch(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    cache = {"events": [], "fetched_at": None}
+    release_fetch = threading.Event()
+    chat_called = threading.Event()
+
+    def slow_fetch(days_ahead, timeout):
+        release_fetch.wait(timeout=5)
+        return []
+
+    def fake_chat(messages, think=False, stream_to_stdout=True):
+        chat_called.set()
+        return "hi there"
+
+    with patch("ochat.ochat_calendar.is_macos", return_value=True), \
+         patch("ochat.ochat_calendar.fetch_upcoming_events", side_effect=slow_fetch), \
+         patch("ochat.ollama_embed", return_value=__import__("numpy").array([1.0], dtype="float32")), \
+         patch("ochat.ollama_chat", side_effect=fake_chat), \
+         patch("ochat.extract_facts"):
+        turn_thread = threading.Thread(
+            target=ochat.handle_turn, args=(conn, thread, path, "hello", "off", cache)
+        )
+        turn_thread.start()
+        chat_was_called_promptly = chat_called.wait(timeout=2)
+        release_fetch.set()
+        turn_thread.join(timeout=5)
+        if cache.get("_thread") is not None:
+            cache["_thread"].join(timeout=2)
+
+    assert chat_was_called_promptly, "handle_turn blocked on the calendar fetch instead of proceeding"
 
 
 def test_cmd_calendar_list_prints_events(capsys):

@@ -111,6 +111,16 @@ On macOS, it goes a step further:
 None of this works off macOS — `ochat` just quietly skips it and keeps
 working normally (date/time awareness in chat still works everywhere).
 
+**A note on speed:** reading Calendar.app's events is genuinely slow on
+macOS — anywhere from a couple seconds to over a minute, depending on how
+many calendars and events you have (subscribed Holidays/Birthdays calendars
+with hundreds of recurring entries are the usual culprit). `ochat calendar
+list` always waits for the real answer, so it can take a while the first
+time. During chat, this never blocks you: the very first message of a
+session won't have calendar context yet (it's being fetched in the
+background), but it'll be there starting your next message, refreshed
+roughly every 5 minutes after that.
+
 **One-time setup note:** the very first time `ochat` tries to read or write
 your calendar, macOS will pop up a permission dialog (Automation and/or
 Calendars, under **System Settings > Privacy & Security**). Only you can

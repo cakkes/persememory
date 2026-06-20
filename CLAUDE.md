@@ -40,7 +40,7 @@ plan this project was built from.
 ./ochat.py memory forget <id>
 ./ochat.py calendar list         # macOS only; lists upcoming Calendar.app events
 
-# Run the full test suite (85 tests: tests/test_memory.py + tests/test_calendar.py)
+# Run the full test suite (88 tests: tests/test_memory.py + tests/test_calendar.py)
 uv run --with pytest --with numpy --with requests pytest tests/ -v
 
 # Run a single test (from either tests/test_memory.py or tests/test_calendar.py)
@@ -132,10 +132,35 @@ updated after each insert to catch within-call near-duplicates).
 
 ### Concurrency
 
-Exactly one daemon thread per turn (`extract_facts`), at most one alive at a
-time. The SQLite connection is opened with `check_same_thread=False` and WAL
-mode so the main thread and the extraction thread can read/write without
-explicit locking.
+Each turn can have up to two daemon threads in flight: `extract_facts` (at
+most one alive at a time, reaped via the `pending_extraction` handle in
+`run_chat_loop`) and, independently, a calendar-cache refresh thread spawned
+by `refresh_calendar_cache` (at most one alive at a time, guarded by the
+`calendar_cache["refreshing"]` flag — see "Calendar cache refresh is
+fire-and-forget" below). Neither thread blocks the other, and neither blocks
+the main chat turn. The SQLite connection is opened with
+`check_same_thread=False` and WAL mode so the main thread and the extraction
+thread can read/write without explicit locking.
+
+### Calendar cache refresh is fire-and-forget
+
+`refresh_calendar_cache` never blocks: it always returns
+`calendar_cache`'s last-known `events` immediately. When the cache is stale
+(or empty) and no refresh is already running, it flips
+`calendar_cache["refreshing"]` to `True`, spawns a daemon thread
+(`_run_calendar_refresh`, stashed at `calendar_cache["_thread"]`) to call
+`ochat_calendar.fetch_upcoming_events`, and returns without waiting — the
+*next* turn sees the refreshed cache, not the current one. This exists
+because `fetch_upcoming_events`'s AppleScript `whose` filter on Calendar.app
+events is a per-event round trip (tens of ms each) rather than a native
+query, so against a real-world calendar set (many calendars, recurring
+all-day calendars like Holidays/Birthdays) the call can legitimately take
+60–90+ seconds — far longer than is acceptable to block an interactive chat
+turn on, even though `APPLESCRIPT_TIMEOUT_SECONDS` (120s) is sized to let it
+finish rather than error out. `ochat calendar list` (`cmd_calendar_list`)
+intentionally bypasses this cache and calls `fetch_upcoming_events` directly
+since it's a deliberate one-off command — it's expected to take as long as
+the AppleScript call actually takes.
 
 ### Notable hardening details worth preserving when touching this code
 
@@ -158,9 +183,10 @@ no config file. Alongside the original set (`OLLAMA_URL`, `CHAT_MODEL`,
 `CALENDAR_ENABLED` (`True` — master on/off switch), `CALENDAR_LOOKAHEAD_DAYS`
 (`7` — how far ahead `fetch_upcoming_events` looks), `CALENDAR_CACHE_TTL_SECONDS`
 (`300` — how long `refresh_calendar_cache` reuses a fetched event list before
-refreshing), and `APPLESCRIPT_TIMEOUT_SECONDS` (`10` — timeout for any single
-`osascript` subprocess call in `ochat_calendar.py`). See `Persememory.md` §8
-and §16 for the full reference.
+refreshing), and `APPLESCRIPT_TIMEOUT_SECONDS` (`120` — timeout for any single
+`osascript` subprocess call in `ochat_calendar.py`; sized for `whose`-filtered
+Calendar.app scans against real-world calendar volumes, not just `create_event`,
+which is much faster). See `Persememory.md` §8 and §16 for the full reference.
 
 ## Testing conventions
 
@@ -170,7 +196,7 @@ functions are tested with plain values, storage functions use pytest's
 Ollama HTTP calls are mocked with `unittest.mock.patch`, asserting on actual
 request payload shape (model name, JSON body, streaming flag), not just that
 a call happened. `tests/test_calendar.py` follows the same TDD/mocking
-conventions (85 tests: tests/test_memory.py + tests/test_calendar.py): pure
+conventions (88 tests: tests/test_memory.py + tests/test_calendar.py): pure
 logic (e.g. `looks_calendar_related`, `current_datetime_context`) is tested
 directly, and `osascript` subprocess calls, `ollama_chat` intent
 classification, and `builtins.input` confirmation prompts are all mocked so

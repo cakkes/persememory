@@ -38,7 +38,7 @@ EXTRACTION_JOIN_TIMEOUT_SECONDS = 5
 CALENDAR_ENABLED = True
 CALENDAR_LOOKAHEAD_DAYS = 7
 CALENDAR_CACHE_TTL_SECONDS = 300
-APPLESCRIPT_TIMEOUT_SECONDS = 10
+APPLESCRIPT_TIMEOUT_SECONDS = 120
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -405,16 +405,31 @@ def build_system_prompt(relevant_facts, calendar_events=None):
     return "\n\n".join(sections)
 
 
-def refresh_calendar_cache(calendar_cache: dict) -> list[dict]:
-    fetched_at = calendar_cache.get("fetched_at")
-    if fetched_at is not None and (datetime.now(timezone.utc) - fetched_at).total_seconds() < CALENDAR_CACHE_TTL_SECONDS:
-        return calendar_cache.get("events", [])
+def _run_calendar_refresh(calendar_cache: dict) -> None:
     try:
         events = ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)
         calendar_cache["events"] = events
         calendar_cache["fetched_at"] = datetime.now(timezone.utc)
     except ochat_calendar.CalendarError as exc:
         print(f"\nwarning: calendar read failed ({exc}); continuing with last-known events", file=sys.stderr)
+    finally:
+        calendar_cache["refreshing"] = False
+
+
+def refresh_calendar_cache(calendar_cache: dict) -> list[dict]:
+    # fetch_upcoming_events can take well over a minute against large/synced
+    # calendars (Calendar.app's AppleScript "whose" filter is a per-event
+    # round trip, not a native query), so this always returns immediately
+    # with the last-known events and lets a background thread refresh the
+    # cache for the *next* turn -- mirrors the extract_facts daemon pattern.
+    fetched_at = calendar_cache.get("fetched_at")
+    if fetched_at is not None and (datetime.now(timezone.utc) - fetched_at).total_seconds() < CALENDAR_CACHE_TTL_SECONDS:
+        return calendar_cache.get("events", [])
+    if not calendar_cache.get("refreshing"):
+        calendar_cache["refreshing"] = True
+        thread = threading.Thread(target=_run_calendar_refresh, args=(calendar_cache,), daemon=True)
+        calendar_cache["_thread"] = thread
+        thread.start()
     return calendar_cache.get("events", [])
 
 
