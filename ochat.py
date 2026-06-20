@@ -386,7 +386,12 @@ def extract_facts(conn, user_message: str, assistant_message: str, source_thread
 
 def build_system_prompt(relevant_facts, calendar_events=None):
     sections = [
-        f"You are a helpful assistant talking with the user in their terminal.\n\n{current_datetime_context()}"
+        "You are a helpful assistant talking with the user in their terminal.\n\n"
+        f"{current_datetime_context()}\n"
+        "This is real, current information from the user's system clock, not a "
+        "guess or a memory. When asked what the current date or time is, answer "
+        "directly using the value above — never say you lack real-time access "
+        "or a live clock; you have been given it right here."
     ]
     if relevant_facts:
         bullets = "\n".join(f"- {fact['text']}" for fact in relevant_facts)
