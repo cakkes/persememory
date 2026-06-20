@@ -41,8 +41,10 @@ that speed complaint in mind.
 
 ```
 ~/ochat/
-  ochat.py            # the entire tool — single file, ~440 lines
+  ochat.py            # the core tool — ~600 lines
+  ochat_calendar.py   # macOS Calendar.app I/O layer (AppleScript)
   tests/test_memory.py
+  tests/test_calendar.py
 ```
 
 `ochat.py` opens with a `uv run --script` shebang and a PEP 723 inline
@@ -324,10 +326,10 @@ what SQLite's WAL mode already provides.
 
 ## 12. Testing
 
-33 tests in `tests/test_memory.py`, run via:
+85 tests: `tests/test_memory.py` (33) + `tests/test_calendar.py` (52), run via:
 
 ```bash
-uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v
+uv run --with pytest --with numpy --with requests pytest tests/ -v
 ```
 
 The suite was built test-first (TDD) across the project's development:
@@ -378,8 +380,10 @@ considered complete. Source documents:
 
 ```
 ochat/
-  ochat.py                              # the entire application
+  ochat.py                              # the core application
+  ochat_calendar.py                     # macOS Calendar.app I/O layer
   tests/test_memory.py                  # 33 tests
+  tests/test_calendar.py                # 52 tests
   .gitignore
   quickuse.md                           # quick reference (this doc's companion)
   Persememory.md                        # this file
