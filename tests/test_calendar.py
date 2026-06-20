@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import ochat
+import ochat_calendar
 
 
 def test_current_datetime_context_formats_local_time():
@@ -29,3 +30,17 @@ def test_looks_calendar_related_is_case_insensitive():
 
 def test_looks_calendar_related_false_for_unrelated_text():
     assert ochat.looks_calendar_related("what's the weather like") is False
+
+
+def test_calendar_error_is_an_exception():
+    assert issubclass(ochat_calendar.CalendarError, Exception)
+
+
+def test_is_macos_true_when_platform_is_darwin():
+    with patch("ochat_calendar.platform.system", return_value="Darwin"):
+        assert ochat_calendar.is_macos() is True
+
+
+def test_is_macos_false_when_platform_is_not_darwin():
+    with patch("ochat_calendar.platform.system", return_value="Linux"):
+        assert ochat_calendar.is_macos() is False
