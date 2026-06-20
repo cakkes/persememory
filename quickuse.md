@@ -81,6 +81,45 @@ ochat memory forget <id>       # delete a specific fact by id
 Facts are shared across all threads — something it learns in one
 conversation can be recalled in a completely different one, days later.
 
+## Calendar awareness
+
+`ochat` now always knows the current date and time, and mentions it to the
+model automatically on every turn — so it can correctly figure out what
+"tomorrow" or "next Thursday" actually means, instead of guessing.
+
+On macOS, it goes a step further:
+
+- Your upcoming events from Calendar.app (the next 7 days, across every
+  calendar) are quietly pulled in as context, so you can ask things like
+  "what do I have on Thursday?" and get a real answer.
+- If you ask it to add something — "schedule a dentist appointment next
+  Tuesday at 2pm" — it figures out the actual date/time you mean, and asks
+  you to confirm before writing anything:
+
+  ```
+  Add to calendar? "Dentist appointment" -- Tue, Jun 23 2026, 2:00-3:00 PM [y/N]
+  ```
+
+  Nothing is added to your real calendar unless you type `y` or `yes`.
+
+- You can also just list what's coming up directly, without chatting at all:
+
+  ```bash
+  ochat calendar list
+  ```
+
+None of this works off macOS — `ochat` just quietly skips it and keeps
+working normally (date/time awareness in chat still works everywhere).
+
+**One-time setup note:** the very first time `ochat` tries to read or write
+your calendar, macOS will pop up a permission dialog (Automation and/or
+Calendars, under **System Settings > Privacy & Security**). Only you can
+approve that dialog — `ochat` can't click through it for you. If calendar
+features seem to silently do nothing, check that you actually approved the
+prompt (or that it isn't sitting unanswered behind another window), and
+that ochat/Terminal has access under **Privacy & Security > Automation**
+and **Privacy & Security > Calendars**.
+
 ## Where your data lives
 
 ```

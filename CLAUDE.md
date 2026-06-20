@@ -4,12 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`ochat.py` is a single-file Python CLI (~440 lines) that wraps a local Ollama
+`ochat.py` is a single-file Python CLI (~600 lines) that wraps a local Ollama
 chat model with two things plain `ollama run` lacks: resumable named
 conversation threads, and a long-term fact memory recalled by semantic search
 across threads. It was built to replace a slower general-purpose agent
 gateway, so every design choice favors speed and simplicity: no daemon, no
 config file, no vector database — it only runs while actively in use.
+
+It also gained clock/calendar awareness: every chat turn, fact-extraction
+call, and calendar-intent classification is anchored to the current local
+date/time, and on macOS it can surface upcoming Calendar.app events as
+context and create new events from natural language (behind a y/N
+confirmation). `ochat_calendar.py` is a second, separate file holding the
+macOS-only AppleScript I/O for this. All of it degrades gracefully off macOS
+or without Calendar permission — date/time awareness keeps working
+regardless.
 
 For full design rationale, data model, and the function-by-function
 reference, read `Persememory.md` — it's exhaustive and should be treated as
@@ -29,6 +38,7 @@ plan this project was built from.
 ./ochat.py threads
 ./ochat.py memory list
 ./ochat.py memory forget <id>
+./ochat.py calendar list         # macOS only; lists upcoming Calendar.app events
 
 # Run the full test suite (33 tests)
 uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v
@@ -51,7 +61,8 @@ Despite being one file, `ochat.py` is organized into four layers, top to
 bottom in the source, and new code should stay within this layering:
 
 1. **Pure logic** (no I/O) — `cosine_similarity`, `top_k_facts`,
-   `is_duplicate_fact`, `estimate_tokens`, `truncate_messages_to_budget`.
+   `is_duplicate_fact`, `estimate_tokens`, `truncate_messages_to_budget`,
+   `current_datetime_context`, `looks_calendar_related`.
    Unit-test these with plain values, no mocking.
 2. **Storage** — thread JSON files (`load_thread`/`save_thread`) and the
    SQLite fact store (`init_db`/`insert_fact`/`get_all_facts`/`delete_fact`).
@@ -59,7 +70,20 @@ bottom in the source, and new code should stay within this layering:
 3. **Ollama client** — `check_ollama_ready`, `ollama_embed`, `ollama_chat`.
    All HTTP calls to the local Ollama server; mock `requests` in tests.
 4. **Orchestration + CLI** — `handle_turn`, `run_chat_loop`, `extract_facts`,
-   and the `cmd_*`/`main()` argparse wiring.
+   `refresh_calendar_cache`, `handle_calendar_create_intent`,
+   `classify_calendar_intent`, and the `cmd_*`/`main()` argparse wiring.
+
+There is also a **second I/O-layer file**, `ochat_calendar.py`, sitting
+alongside `ochat.py`'s "Storage" and "Ollama client" layers but kept
+separate because it's macOS-specific: a pure AppleScript (`osascript`) I/O
+layer for Calendar.app, with `is_macos()`, `CalendarError`,
+`fetch_upcoming_events(days_ahead, timeout)`, and
+`create_event(title, start, end, notes, timeout)`. It has no model calls, no
+prompts, and no CLI of its own — `ochat.py`'s orchestration layer decides
+when and why to call it, the same way it already calls `insert_fact` or
+`ollama_embed`. Always check `ochat_calendar.is_macos()` (or
+`CALENDAR_ENABLED`) before calling into it, and expect/catch
+`ochat_calendar.CalendarError` — it never raises anything else.
 
 All runtime data lives outside the repo under `~/.local/share/ochat/`
 (`threads/<name>.json`, `memory.db`, `extraction.log`) — never under the repo
@@ -123,6 +147,20 @@ explicit locking.
   (`<name>.json.corrupt-<timestamp>`) and starts fresh.
 - `check_ollama_ready` never auto-pulls a missing model; it always prints the
   exact `ollama pull <model>` command and exits.
+
+### Configuration
+
+All tunables are plain module-level constants at the top of `ochat.py` —
+no config file. Alongside the original set (`OLLAMA_URL`, `CHAT_MODEL`,
+`EMBED_MODEL`, `CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`, `RETRIEVAL_TOP_K`,
+`RETRIEVAL_MIN_SIMILARITY`, `DEDUP_SIMILARITY_THRESHOLD`, `DEFAULT_THINK`,
+`EXTRACTION_JOIN_TIMEOUT_SECONDS`), the calendar feature added:
+`CALENDAR_ENABLED` (`True` — master on/off switch), `CALENDAR_LOOKAHEAD_DAYS`
+(`7` — how far ahead `fetch_upcoming_events` looks), `CALENDAR_CACHE_TTL_SECONDS`
+(`300` — how long `refresh_calendar_cache` reuses a fetched event list before
+refreshing), and `APPLESCRIPT_TIMEOUT_SECONDS` (`10` — timeout for any single
+`osascript` subprocess call in `ochat_calendar.py`). See `Persememory.md` §8
+and §16 for the full reference.
 
 ## Testing conventions
 
