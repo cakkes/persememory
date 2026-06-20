@@ -40,11 +40,11 @@ plan this project was built from.
 ./ochat.py memory forget <id>
 ./ochat.py calendar list         # macOS only; lists upcoming Calendar.app events
 
-# Run the full test suite (33 tests)
-uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v
+# Run the full test suite (85 tests: tests/test_memory.py + tests/test_calendar.py)
+uv run --with pytest --with numpy --with requests pytest tests/ -v
 
-# Run a single test
-uv run --with pytest --with numpy --with requests pytest tests/test_memory.py -v -k test_name
+# Run a single test (from either tests/test_memory.py or tests/test_calendar.py)
+uv run --with pytest --with numpy --with requests pytest tests/ -v -k test_name
 
 # Prerequisite: Ollama must be running locally with both models pulled
 ollama serve

@@ -97,7 +97,7 @@ On macOS, it goes a step further:
   you to confirm before writing anything:
 
   ```
-  Add to calendar? "Dentist appointment" -- Tue, Jun 23 2026, 2:00-3:00 PM [y/N]
+  Add to calendar? "Dentist appointment" -- Tue, Jun 23 2026, 02:00 PM-03:00 PM [y/N]
   ```
 
   Nothing is added to your real calendar unless you type `y` or `yes`.
