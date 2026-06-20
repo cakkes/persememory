@@ -307,6 +307,48 @@ def _extract_json_object(text: str) -> str:
     return _extract_json_substring(text, "{", "}")
 
 
+CALENDAR_INTENT_PROMPT = (
+    "You help detect calendar-related requests. Given the current date/time "
+    "context and a user message, respond with ONLY a JSON object describing "
+    "the user's calendar intent: "
+    '{"intent": "none"|"query"|"create", "title": string or null, '
+    '"start": string or null, "end": string or null, "notes": string or null}. '
+    'Use intent "create" only if the user is clearly asking to add a new '
+    "event/appointment/meeting to their calendar. Use intent \"query\" if "
+    "they're asking what's on their calendar or about existing events. "
+    "Otherwise use \"none\". When intent is \"create\", resolve any relative "
+    'dates/times (e.g. "next Thursday", "tomorrow at 2pm") to absolute ISO '
+    '8601 datetimes (YYYY-MM-DDTHH:MM:SS) for "start" and "end" using the '
+    "current date/time context given. If no explicit end time is mentioned, "
+    "assume the event is 1 hour long."
+)
+
+
+def classify_calendar_intent(user_input: str, now_context: str) -> dict:
+    fallback = {"intent": "none", "title": None, "start": None, "end": None, "notes": None}
+    try:
+        reply = ollama_chat(
+            [
+                {"role": "system", "content": f"{CALENDAR_INTENT_PROMPT}\n\n{now_context}"},
+                {"role": "user", "content": user_input},
+            ],
+            think=False,
+            stream_to_stdout=False,
+        )
+        parsed = json.loads(_extract_json_object(reply))
+        if not isinstance(parsed, dict) or parsed.get("intent") not in ("none", "query", "create"):
+            return fallback
+        return {
+            "intent": parsed.get("intent"),
+            "title": parsed.get("title"),
+            "start": parsed.get("start"),
+            "end": parsed.get("end"),
+            "notes": parsed.get("notes"),
+        }
+    except Exception:
+        return fallback
+
+
 def extract_facts(conn, user_message: str, assistant_message: str, source_thread: str) -> None:
     try:
         exchange = f"User: {user_message}\nAssistant: {assistant_message}"

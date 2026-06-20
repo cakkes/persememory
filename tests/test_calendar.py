@@ -236,3 +236,53 @@ def test_extract_json_object_handles_prose_wrapped_json():
 def test_extract_json_array_unchanged_behavior():
     text = '```json\n["fact one"]\n```'
     assert ochat._extract_json_array(text) == '["fact one"]'
+
+
+def test_classify_calendar_intent_parses_create_response():
+    response = (
+        '{"intent": "create", "title": "Dentist", '
+        '"start": "2026-06-25T14:00:00", "end": "2026-06-25T14:30:00", "notes": null}'
+    )
+    with patch("ochat.ollama_chat", return_value=response):
+        result = ochat.classify_calendar_intent("add a dentist appt thursday 2pm", "Current date/time: ...")
+    assert result == {
+        "intent": "create",
+        "title": "Dentist",
+        "start": "2026-06-25T14:00:00",
+        "end": "2026-06-25T14:30:00",
+        "notes": None,
+    }
+
+
+def test_classify_calendar_intent_parses_query_response():
+    response = '{"intent": "query", "title": null, "start": null, "end": null, "notes": null}'
+    with patch("ochat.ollama_chat", return_value=response):
+        result = ochat.classify_calendar_intent("what's on my calendar friday", "Current date/time: ...")
+    assert result["intent"] == "query"
+
+
+def test_classify_calendar_intent_handles_fenced_json():
+    response = '```json\n{"intent": "none", "title": null, "start": null, "end": null, "notes": null}\n```'
+    with patch("ochat.ollama_chat", return_value=response):
+        result = ochat.classify_calendar_intent("how's the weather", "Current date/time: ...")
+    assert result["intent"] == "none"
+
+
+def test_classify_calendar_intent_falls_back_to_none_on_malformed_json():
+    with patch("ochat.ollama_chat", return_value="not json at all"):
+        result = ochat.classify_calendar_intent("garbage in", "Current date/time: ...")
+    assert result["intent"] == "none"
+
+
+def test_classify_calendar_intent_falls_back_to_none_on_model_failure():
+    with patch("ochat.ollama_chat", side_effect=RuntimeError("model unreachable")):
+        result = ochat.classify_calendar_intent("add a meeting", "Current date/time: ...")
+    assert result["intent"] == "none"
+
+
+def test_classify_calendar_intent_passes_now_context_to_system_prompt():
+    response = '{"intent": "none", "title": null, "start": null, "end": null, "notes": null}'
+    with patch("ochat.ollama_chat", return_value=response) as mock_chat:
+        ochat.classify_calendar_intent("hi", "Current date/time: Saturday, June 20, 2026")
+    system_message = mock_chat.call_args.args[0][0]["content"]
+    assert "Current date/time: Saturday, June 20, 2026" in system_message
