@@ -543,6 +543,22 @@ def cmd_memory_forget(fact_id: int) -> None:
         sys.exit(1)
 
 
+def cmd_calendar_list() -> None:
+    if not ochat_calendar.is_macos():
+        print("calendar features are only supported on macOS", file=sys.stderr)
+        sys.exit(1)
+    try:
+        events = ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)
+    except ochat_calendar.CalendarError as exc:
+        print(f"error: failed to read calendar ({exc})", file=sys.stderr)
+        sys.exit(1)
+    if not events:
+        print("no upcoming events")
+        return
+    for event in events:
+        print(f"{event['start']} - {event['end']}  {event['title']}  ({event['calendar']})")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ochat")
     parser.add_argument("--thread", default="default")
@@ -554,6 +570,9 @@ def main() -> None:
     memory_sub.add_parser("list")
     forget_parser = memory_sub.add_parser("forget")
     forget_parser.add_argument("fact_id", type=int)
+    calendar_parser = subparsers.add_parser("calendar")
+    calendar_sub = calendar_parser.add_subparsers(dest="calendar_command")
+    calendar_sub.add_parser("list")
 
     args = parser.parse_args()
 
@@ -566,6 +585,11 @@ def main() -> None:
             cmd_memory_forget(args.fact_id)
         else:
             memory_parser.print_help()
+    elif args.command == "calendar":
+        if args.calendar_command == "list":
+            cmd_calendar_list()
+        else:
+            calendar_parser.print_help()
     else:
         run_chat_loop(args.thread, args.think)
 

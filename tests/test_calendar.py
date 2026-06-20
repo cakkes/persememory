@@ -422,3 +422,40 @@ def test_handle_turn_includes_calendar_events_in_prompt_when_cache_given(tmp_pat
     result.join(timeout=2)
     system_message = captured_payloads[0][0]["content"]
     assert "Standup" in system_message
+
+
+def test_cmd_calendar_list_prints_events(capsys):
+    events = [{"title": "Standup", "start": "2026-06-21T09:00:00", "end": "2026-06-21T09:15:00", "calendar": "Work"}]
+    with patch("ochat.ochat_calendar.is_macos", return_value=True), \
+         patch("ochat.ochat_calendar.fetch_upcoming_events", return_value=events):
+        ochat.cmd_calendar_list()
+    out = capsys.readouterr().out
+    assert "Standup" in out
+
+
+def test_cmd_calendar_list_prints_message_when_no_events(capsys):
+    with patch("ochat.ochat_calendar.is_macos", return_value=True), \
+         patch("ochat.ochat_calendar.fetch_upcoming_events", return_value=[]):
+        ochat.cmd_calendar_list()
+    assert "no upcoming events" in capsys.readouterr().out
+
+
+def test_cmd_calendar_list_exits_with_error_off_macos(capsys):
+    with patch("ochat.ochat_calendar.is_macos", return_value=False), \
+         patch("ochat.sys.exit", side_effect=SystemExit) as mock_exit:
+        try:
+            ochat.cmd_calendar_list()
+        except SystemExit:
+            pass
+    mock_exit.assert_called_with(1)
+
+
+def test_cmd_calendar_list_exits_with_error_on_calendar_error(capsys):
+    with patch("ochat.ochat_calendar.is_macos", return_value=True), \
+         patch("ochat.ochat_calendar.fetch_upcoming_events", side_effect=ochat.ochat_calendar.CalendarError("denied")), \
+         patch("ochat.sys.exit", side_effect=SystemExit) as mock_exit:
+        try:
+            ochat.cmd_calendar_list()
+        except SystemExit:
+            pass
+    mock_exit.assert_called_with(1)
