@@ -135,3 +135,50 @@ def test_fetch_upcoming_events_returns_parsed_events():
     assert events[0]["title"] == "Standup"
     mock_run.assert_called_once()
     assert mock_run.call_args.args[1] == 10
+
+
+def test_escape_applescript_string_escapes_quotes_and_backslashes():
+    assert ochat_calendar._escape_applescript_string('say "hi" \\ done') == 'say \\"hi\\" \\\\ done'
+
+
+def test_format_applescript_date_setup_sets_each_field():
+    when = datetime(2026, 6, 25, 14, 30)
+    script = ochat_calendar._format_applescript_date_setup("startDate", when)
+    assert "set year of startDate to 2026" in script
+    assert "set month of startDate to 6" in script
+    assert "set day of startDate to 25" in script
+    assert "set hours of startDate to 14" in script
+    assert "set minutes of startDate to 30" in script
+
+
+def test_create_event_runs_applescript_with_title_and_dates():
+    start = datetime(2026, 6, 25, 14, 0)
+    end = datetime(2026, 6, 25, 14, 30)
+    with patch("ochat_calendar._run_applescript", return_value="") as mock_run:
+        ochat_calendar.create_event("Dentist", start, end, notes=None, timeout=10)
+    script = mock_run.call_args.args[0]
+    assert "Dentist" in script
+    assert "set year of startDate to 2026" in script
+    assert "set hours of endDate to 14" in script
+    assert "make new event" in script
+    assert mock_run.call_args.args[1] == 10
+
+
+def test_create_event_escapes_quotes_in_title():
+    start = datetime(2026, 6, 25, 14, 0)
+    end = datetime(2026, 6, 25, 14, 30)
+    with patch("ochat_calendar._run_applescript", return_value="") as mock_run:
+        ochat_calendar.create_event('Say "hi"', start, end, notes=None, timeout=10)
+    script = mock_run.call_args.args[0]
+    assert 'Say \\"hi\\"' in script
+
+
+def test_create_event_raises_calendar_error_on_applescript_failure():
+    start = datetime(2026, 6, 25, 14, 0)
+    end = datetime(2026, 6, 25, 14, 30)
+    with patch("ochat_calendar._run_applescript", side_effect=ochat_calendar.CalendarError("denied")):
+        try:
+            ochat_calendar.create_event("Dentist", start, end, notes=None, timeout=10)
+            assert False, "expected CalendarError"
+        except ochat_calendar.CalendarError:
+            pass

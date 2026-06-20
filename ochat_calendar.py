@@ -84,3 +84,36 @@ def fetch_upcoming_events(days_ahead: int, timeout: float) -> list[dict]:
     script = _build_fetch_script(days_ahead)
     raw = _run_applescript(script, timeout)
     return _parse_events(raw)
+
+
+def _escape_applescript_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _format_applescript_date_setup(var_name: str, when: datetime) -> str:
+    return (
+        f"set day of {var_name} to 1\n"
+        f"set year of {var_name} to {when.year}\n"
+        f"set month of {var_name} to {when.month}\n"
+        f"set day of {var_name} to {when.day}\n"
+        f"set hours of {var_name} to {when.hour}\n"
+        f"set minutes of {var_name} to {when.minute}\n"
+        f"set seconds of {var_name} to 0\n"
+    )
+
+
+def create_event(title: str, start: datetime, end: datetime, notes: str | None, timeout: float) -> None:
+    safe_title = _escape_applescript_string(title)
+    safe_notes = _escape_applescript_string(notes or "")
+    script = (
+        "set startDate to current date\n"
+        + _format_applescript_date_setup("startDate", start)
+        + "set endDate to current date\n"
+        + _format_applescript_date_setup("endDate", end)
+        + "tell application \"Calendar\"\n"
+        + "    tell calendar 1\n"
+        + f'        make new event at end with properties {{summary:"{safe_title}", start date:startDate, end date:endDate, description:"{safe_notes}"}}\n'
+        + "    end tell\n"
+        + "end tell\n"
+    )
+    _run_applescript(script, timeout)
