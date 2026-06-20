@@ -44,3 +44,47 @@ def test_is_macos_true_when_platform_is_darwin():
 def test_is_macos_false_when_platform_is_not_darwin():
     with patch("ochat_calendar.platform.system", return_value="Linux"):
         assert ochat_calendar.is_macos() is False
+
+
+from unittest.mock import MagicMock
+import subprocess as subprocess_module
+
+
+def test_run_applescript_returns_stdout_on_success():
+    fake_result = MagicMock(returncode=0, stdout="hello\n", stderr="")
+    with patch("ochat_calendar.subprocess.run", return_value=fake_result) as mock_run:
+        result = ochat_calendar._run_applescript("return \"hello\"", timeout=5)
+    assert result == "hello\n"
+    mock_run.assert_called_once()
+    assert mock_run.call_args.args[0] == ["osascript", "-e", "return \"hello\""]
+
+
+def test_run_applescript_raises_calendar_error_on_nonzero_exit():
+    fake_result = MagicMock(returncode=1, stdout="", stderr="some AppleScript error")
+    with patch("ochat_calendar.subprocess.run", return_value=fake_result):
+        try:
+            ochat_calendar._run_applescript("bad script", timeout=5)
+            assert False, "expected CalendarError"
+        except ochat_calendar.CalendarError as exc:
+            assert "some AppleScript error" in str(exc)
+
+
+def test_run_applescript_raises_calendar_error_on_timeout():
+    with patch(
+        "ochat_calendar.subprocess.run",
+        side_effect=subprocess_module.TimeoutExpired(cmd="osascript", timeout=5),
+    ):
+        try:
+            ochat_calendar._run_applescript("slow script", timeout=5)
+            assert False, "expected CalendarError"
+        except ochat_calendar.CalendarError:
+            pass
+
+
+def test_run_applescript_raises_calendar_error_when_osascript_missing():
+    with patch("ochat_calendar.subprocess.run", side_effect=FileNotFoundError("no osascript")):
+        try:
+            ochat_calendar._run_applescript("script", timeout=5)
+            assert False, "expected CalendarError"
+        except ochat_calendar.CalendarError:
+            pass

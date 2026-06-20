@@ -15,3 +15,18 @@ class CalendarError(Exception):
 
 def is_macos() -> bool:
     return platform.system() == "Darwin"
+
+
+def _run_applescript(script: str, timeout: float) -> str:
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        raise CalendarError(f"osascript call failed: {exc}") from exc
+    if result.returncode != 0:
+        raise CalendarError(f"osascript exited {result.returncode}: {result.stderr.strip()}")
+    return result.stdout
