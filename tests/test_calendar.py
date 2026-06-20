@@ -88,3 +88,50 @@ def test_run_applescript_raises_calendar_error_when_osascript_missing():
             assert False, "expected CalendarError"
         except ochat_calendar.CalendarError:
             pass
+
+
+def test_build_fetch_script_includes_days_ahead_and_separators():
+    script = ochat_calendar._build_fetch_script(7)
+    assert "7 * days" in script
+    assert "ASCII character 31" in script
+    assert "ASCII character 30" in script
+    assert "every event" in script
+
+
+def test_parse_events_extracts_fields_from_delimited_output():
+    sep = ochat_calendar._FIELD_SEP
+    rec = ochat_calendar._RECORD_SEP
+    raw = (
+        f"Dentist{sep}2026{sep}6{sep}25{sep}14{sep}0"
+        f"{sep}2026{sep}6{sep}25{sep}14{sep}30{sep}Home{rec}"
+    )
+    events = ochat_calendar._parse_events(raw)
+    assert events == [
+        {
+            "title": "Dentist",
+            "start": "2026-06-25T14:00:00",
+            "end": "2026-06-25T14:30:00",
+            "calendar": "Home",
+        }
+    ]
+
+
+def test_parse_events_skips_malformed_records():
+    raw = f"incomplete record{ochat_calendar._RECORD_SEP}"
+    assert ochat_calendar._parse_events(raw) == []
+
+
+def test_parse_events_handles_empty_input():
+    assert ochat_calendar._parse_events("") == []
+
+
+def test_fetch_upcoming_events_returns_parsed_events():
+    sep = ochat_calendar._FIELD_SEP
+    rec = ochat_calendar._RECORD_SEP
+    raw = f"Standup{sep}2026{sep}6{sep}21{sep}9{sep}0{sep}2026{sep}6{sep}21{sep}9{sep}15{sep}Work{rec}"
+    with patch("ochat_calendar._run_applescript", return_value=raw) as mock_run:
+        events = ochat_calendar.fetch_upcoming_events(7, timeout=10)
+    assert len(events) == 1
+    assert events[0]["title"] == "Standup"
+    mock_run.assert_called_once()
+    assert mock_run.call_args.args[1] == 10
