@@ -81,6 +81,18 @@ def current_datetime_context() -> str:
     return f"Current date/time: {now.strftime('%A, %B %d, %Y, %I:%M %p %Z')}"
 
 
+CALENDAR_KEYWORDS = (
+    "calendar", "schedule", "scheduled", "meeting", "appointment", "event",
+    "remind", "reminder", "monday", "tuesday", "wednesday", "thursday",
+    "friday", "saturday", "sunday", "tomorrow", "tonight",
+)
+
+
+def looks_calendar_related(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in CALENDAR_KEYWORDS)
+
+
 def thread_path(name: str) -> Path:
     return THREADS_DIR / f"{name}.json"
 
