@@ -313,3 +313,112 @@ def test_extract_facts_includes_current_datetime_in_system_prompt(tmp_path):
         ochat.extract_facts(conn, "let's meet next Thursday", "sounds good", "default")
     system_message = mock_chat.call_args.args[0][0]["content"]
     assert "Current date/time:" in system_message
+
+
+def test_refresh_calendar_cache_fetches_when_empty():
+    events = [{"title": "Standup", "start": "2026-06-21T09:00:00", "end": "2026-06-21T09:15:00", "calendar": "Work"}]
+    cache = {"events": [], "fetched_at": None}
+    with patch("ochat.ochat_calendar.fetch_upcoming_events", return_value=events) as mock_fetch:
+        result = ochat.refresh_calendar_cache(cache)
+    assert result == events
+    assert cache["events"] == events
+    mock_fetch.assert_called_once()
+
+
+def test_refresh_calendar_cache_reuses_fresh_cache():
+    cache = {"events": [{"title": "cached"}], "fetched_at": datetime.now(timezone.utc)}
+    with patch("ochat.ochat_calendar.fetch_upcoming_events") as mock_fetch:
+        result = ochat.refresh_calendar_cache(cache)
+    assert result == [{"title": "cached"}]
+    mock_fetch.assert_not_called()
+
+
+def test_refresh_calendar_cache_keeps_last_known_on_error():
+    cache = {"events": [{"title": "stale"}], "fetched_at": None}
+    with patch("ochat.ochat_calendar.fetch_upcoming_events", side_effect=ochat.ochat_calendar.CalendarError("denied")):
+        result = ochat.refresh_calendar_cache(cache)
+    assert result == [{"title": "stale"}]
+
+
+def test_handle_calendar_create_intent_confirmed_calls_create_event():
+    cache = {"events": [], "fetched_at": None}
+    intent_response = (
+        '{"intent": "create", "title": "Dentist", "start": "2026-06-25T14:00:00", '
+        '"end": "2026-06-25T14:30:00", "notes": null}'
+    )
+    with patch("ochat.ollama_chat", return_value=intent_response), \
+         patch("builtins.input", return_value="y"), \
+         patch("ochat.ochat_calendar.create_event") as mock_create:
+        ochat.handle_calendar_create_intent("add a dentist appt thursday 2pm", "Current date/time: ...", cache)
+    mock_create.assert_called_once()
+    assert cache["events"][0]["title"] == "Dentist"
+
+
+def test_handle_calendar_create_intent_declined_skips_create_event():
+    cache = {"events": [], "fetched_at": None}
+    intent_response = (
+        '{"intent": "create", "title": "Dentist", "start": "2026-06-25T14:00:00", '
+        '"end": "2026-06-25T14:30:00", "notes": null}'
+    )
+    with patch("ochat.ollama_chat", return_value=intent_response), \
+         patch("builtins.input", return_value="n"), \
+         patch("ochat.ochat_calendar.create_event") as mock_create:
+        ochat.handle_calendar_create_intent("add a dentist appt thursday 2pm", "Current date/time: ...", cache)
+    mock_create.assert_not_called()
+    assert cache["events"] == []
+
+
+def test_handle_calendar_create_intent_query_does_nothing():
+    cache = {"events": [], "fetched_at": None}
+    with patch("ochat.ollama_chat", return_value='{"intent": "query", "title": null, "start": null, "end": null, "notes": null}'), \
+         patch("ochat.ochat_calendar.create_event") as mock_create:
+        ochat.handle_calendar_create_intent("what's on my calendar friday", "Current date/time: ...", cache)
+    mock_create.assert_not_called()
+
+
+def test_handle_calendar_create_intent_create_failure_does_not_raise():
+    cache = {"events": [], "fetched_at": None}
+    intent_response = (
+        '{"intent": "create", "title": "Dentist", "start": "2026-06-25T14:00:00", '
+        '"end": "2026-06-25T14:30:00", "notes": null}'
+    )
+    with patch("ochat.ollama_chat", return_value=intent_response), \
+         patch("builtins.input", return_value="y"), \
+         patch("ochat.ochat_calendar.create_event", side_effect=ochat.ochat_calendar.CalendarError("denied")):
+        ochat.handle_calendar_create_intent("add a dentist appt thursday 2pm", "Current date/time: ...", cache)  # must not raise
+    assert cache["events"] == []
+
+
+def test_handle_turn_skips_calendar_block_when_cache_is_none(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", return_value=__import__("numpy").array([1.0], dtype="float32")), \
+         patch("ochat.ollama_chat", return_value="hi there"), \
+         patch("ochat.extract_facts"):
+        result = ochat.handle_turn(conn, thread, path, "add a meeting thursday", "off")
+    assert result is not None
+    result.join(timeout=2)
+
+
+def test_handle_turn_includes_calendar_events_in_prompt_when_cache_given(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    cache = {"events": [], "fetched_at": None}
+    events = [{"title": "Standup", "start": "2026-06-21T09:00:00", "end": "2026-06-21T09:15:00", "calendar": "Work"}]
+    captured_payloads = []
+
+    def fake_chat(messages, think=False, stream_to_stdout=True):
+        captured_payloads.append(messages)
+        return "hi there"
+
+    with patch("ochat.ochat_calendar.is_macos", return_value=True), \
+         patch("ochat.ochat_calendar.fetch_upcoming_events", return_value=events), \
+         patch("ochat.ollama_embed", return_value=__import__("numpy").array([1.0], dtype="float32")), \
+         patch("ochat.ollama_chat", side_effect=fake_chat), \
+         patch("ochat.extract_facts"):
+        result = ochat.handle_turn(conn, thread, path, "what's the weather", "off", cache)
+    result.join(timeout=2)
+    system_message = captured_payloads[0][0]["content"]
+    assert "Standup" in system_message

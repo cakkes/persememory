@@ -17,6 +17,8 @@ from pathlib import Path
 import numpy as np
 import requests
 
+import ochat_calendar
+
 OLLAMA_URL = "http://127.0.0.1:11434"
 CHAT_MODEL = "gemma4:12b"
 EMBED_MODEL = "nomic-embed-text"
@@ -33,6 +35,10 @@ RETRIEVAL_MIN_SIMILARITY = 0.45
 DEDUP_SIMILARITY_THRESHOLD = 0.92
 DEFAULT_THINK = "off"
 EXTRACTION_JOIN_TIMEOUT_SECONDS = 5
+CALENDAR_ENABLED = True
+CALENDAR_LOOKAHEAD_DAYS = 7
+CALENDAR_CACHE_TTL_SECONDS = 300
+APPLESCRIPT_TIMEOUT_SECONDS = 10
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -394,7 +400,52 @@ def build_system_prompt(relevant_facts, calendar_events=None):
     return "\n\n".join(sections)
 
 
-def handle_turn(conn, thread, path, user_input, think):
+def refresh_calendar_cache(calendar_cache: dict) -> list[dict]:
+    fetched_at = calendar_cache.get("fetched_at")
+    if fetched_at is not None and (datetime.now(timezone.utc) - fetched_at).total_seconds() < CALENDAR_CACHE_TTL_SECONDS:
+        return calendar_cache.get("events", [])
+    try:
+        events = ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)
+        calendar_cache["events"] = events
+        calendar_cache["fetched_at"] = datetime.now(timezone.utc)
+    except ochat_calendar.CalendarError as exc:
+        print(f"\nwarning: calendar read failed ({exc}); continuing with last-known events", file=sys.stderr)
+    return calendar_cache.get("events", [])
+
+
+def handle_calendar_create_intent(user_input: str, now_context: str, calendar_cache: dict) -> None:
+    intent_result = classify_calendar_intent(user_input, now_context)
+    if intent_result["intent"] != "create":
+        return
+    title = intent_result.get("title")
+    start_raw = intent_result.get("start")
+    end_raw = intent_result.get("end")
+    if not title or not start_raw or not end_raw:
+        return
+    try:
+        start = datetime.fromisoformat(start_raw)
+        end = datetime.fromisoformat(end_raw)
+    except ValueError:
+        return
+    confirm_text = (
+        f'Add to calendar? "{title}" -- '
+        f'{start.strftime("%a, %b %d %Y, %I:%M %p")}-{end.strftime("%I:%M %p")} [y/N] '
+    )
+    answer = input(confirm_text).strip().lower()
+    if answer not in ("y", "yes"):
+        print("cancelled, nothing was added")
+        return
+    try:
+        ochat_calendar.create_event(title, start, end, intent_result.get("notes"), APPLESCRIPT_TIMEOUT_SECONDS)
+    except ochat_calendar.CalendarError as exc:
+        print(f"error: failed to add event ({exc})", file=sys.stderr)
+        return
+    calendar_cache["events"] = calendar_cache.get("events", []) + [
+        {"title": title, "start": start.isoformat(), "end": end.isoformat(), "calendar": ""}
+    ]
+
+
+def handle_turn(conn, thread, path, user_input, think, calendar_cache=None):
     try:
         query_embedding = ollama_embed(user_input)
     except requests.RequestException as exc:
@@ -407,8 +458,16 @@ def handle_turn(conn, thread, path, user_input, think):
         print(f"\nwarning: fact retrieval failed ({exc}); continuing without relevant facts", file=sys.stderr)
         relevant = []
 
+    calendar_events = []
+    if calendar_cache is not None and CALENDAR_ENABLED and ochat_calendar.is_macos():
+        now_context = current_datetime_context()
+        calendar_events = refresh_calendar_cache(calendar_cache)
+        if looks_calendar_related(user_input):
+            handle_calendar_create_intent(user_input, now_context, calendar_cache)
+            calendar_events = calendar_cache.get("events", calendar_events)
+
     try:
-        system_prompt = build_system_prompt(relevant)
+        system_prompt = build_system_prompt(relevant, calendar_events)
         window = truncate_messages_to_budget(
             thread["messages"] + [{"role": "user", "content": user_input}]
         )
