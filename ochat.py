@@ -268,7 +268,9 @@ EXTRACTION_PROMPT = (
     "Given this exchange, list any new durable facts or preferences about the "
     "user worth remembering long-term. Respond with ONLY a JSON array of short "
     'fact strings, e.g. ["prefers terse answers"]. If nothing is worth '
-    "remembering, respond with []."
+    "remembering, respond with []. Resolve any relative dates mentioned (e.g. "
+    "'next Thursday') to absolute dates before recording a fact, using the "
+    "current date/time context given."
 )
 
 
@@ -354,7 +356,7 @@ def extract_facts(conn, user_message: str, assistant_message: str, source_thread
         exchange = f"User: {user_message}\nAssistant: {assistant_message}"
         reply = ollama_chat(
             [
-                {"role": "system", "content": EXTRACTION_PROMPT},
+                {"role": "system", "content": f"{EXTRACTION_PROMPT}\n\n{current_datetime_context()}"},
                 {"role": "user", "content": exchange},
             ],
             think=False,

@@ -303,3 +303,13 @@ def test_build_system_prompt_includes_calendar_events_section():
 def test_build_system_prompt_omits_calendar_section_when_no_events():
     prompt = ochat.build_system_prompt([], calendar_events=[])
     assert "Upcoming calendar events" not in prompt
+
+
+def test_extract_facts_includes_current_datetime_in_system_prompt(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
+         patch("ochat.ollama_chat", return_value="[]") as mock_chat, \
+         patch("ochat.ollama_embed", return_value=__import__("numpy").array([1.0], dtype="float32")):
+        ochat.extract_facts(conn, "let's meet next Thursday", "sounds good", "default")
+    system_message = mock_chat.call_args.args[0][0]["content"]
+    assert "Current date/time:" in system_message
