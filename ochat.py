@@ -30,6 +30,7 @@ EXTRACTION_LOG_PATH = DATA_DIR / "extraction.log"
 
 CONTEXT_TOKEN_BUDGET = 8192
 OLLAMA_NUM_CTX = 16384
+RESPONSE_TOKEN_RESERVE = 2048
 CHARS_PER_TOKEN = 4
 RETRIEVAL_TOP_K = 8
 RETRIEVAL_MIN_SIMILARITY = 0.45
@@ -81,6 +82,13 @@ def truncate_messages_to_budget(messages, budget_tokens=CONTEXT_TOKEN_BUDGET):
         used += cost
     selected.reverse()
     return selected
+
+
+def effective_history_budget(system_prompt, num_ctx=OLLAMA_NUM_CTX,
+                              response_reserve=RESPONSE_TOKEN_RESERVE,
+                              max_budget=CONTEXT_TOKEN_BUDGET):
+    available = num_ctx - estimate_tokens(system_prompt) - response_reserve
+    return max(0, min(max_budget, available))
 
 
 def current_datetime_context() -> str:

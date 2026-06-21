@@ -83,6 +83,24 @@ def test_truncate_messages_to_budget_always_keeps_newest_message():
     assert len(result) == 1
 
 
+def test_effective_history_budget_uses_max_budget_when_system_prompt_small():
+    result = ochat.effective_history_budget("short system prompt", num_ctx=16384, response_reserve=2048, max_budget=8192)
+    assert result == 8192
+
+
+def test_effective_history_budget_shrinks_for_large_system_prompt():
+    huge_system_prompt = "x" * (7000 * 4)  # ~7000 estimated tokens
+    result = ochat.effective_history_budget(huge_system_prompt, num_ctx=16384, response_reserve=2048, max_budget=8192)
+    assert result == 16384 - 7000 - 2048
+    assert result < 8192
+
+
+def test_effective_history_budget_never_negative():
+    enormous_system_prompt = "x" * (50000 * 4)  # ~50000 estimated tokens, far over num_ctx
+    result = ochat.effective_history_budget(enormous_system_prompt, num_ctx=16384, response_reserve=2048, max_budget=8192)
+    assert result == 0
+
+
 import json
 
 
