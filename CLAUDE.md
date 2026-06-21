@@ -105,8 +105,9 @@ itself.
 
 Embed input → retrieve top-k relevant facts (failure here is fault-isolated:
 logs a warning and continues with an empty fact list, never aborts the turn)
-→ build system prompt + windowed history → stream chat reply → atomically
-persist thread (`save_thread` writes to `.tmp` then `os.replace`s) → spawn a
+→ build system prompt + windowed history (sized by `effective_history_budget`)
+→ stream chat reply, retrying once with a smaller window if it gets cut off
+→ atomically persist thread (`save_thread` writes to `.tmp` then `os.replace`s) → spawn a
 **daemon thread** running `extract_facts` against just that one exchange,
 non-blocking. `run_chat_loop` reaps the previous turn's extraction thread
 with `join(timeout=0)` before starting the next one, and on exit gives the
