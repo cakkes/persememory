@@ -1,6 +1,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -237,6 +239,20 @@ def test_ollama_chat_sets_num_ctx_so_long_threads_dont_get_cut_off():
         ochat.ollama_chat([{"role": "user", "content": "hi"}], think=False, stream_to_stdout=False)
     assert mock_post.call_args.kwargs["json"]["options"]["num_ctx"] == ochat.OLLAMA_NUM_CTX
     assert ochat.OLLAMA_NUM_CTX > ochat.CONTEXT_TOKEN_BUDGET
+
+
+def test_ollama_chat_raises_response_truncated_error_when_done_reason_is_length():
+    fake_response = MagicMock()
+    fake_response.raise_for_status.return_value = None
+    fake_response.iter_lines.return_value = [
+        json.dumps({"message": {"content": "Hel"}, "done": False}).encode(),
+        json.dumps({"message": {"content": "lo"}, "done": False}).encode(),
+        json.dumps({"message": {"content": ""}, "done": True, "done_reason": "length"}).encode(),
+    ]
+    with patch("ochat.requests.post", return_value=fake_response):
+        with pytest.raises(ochat.ResponseTruncatedError) as exc_info:
+            ochat.ollama_chat([{"role": "user", "content": "hi"}], think=False, stream_to_stdout=False)
+    assert exc_info.value.text == "Hello"
 
 
 def test_extract_facts_inserts_new_non_duplicate_facts(tmp_path):

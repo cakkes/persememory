@@ -254,6 +254,16 @@ def ollama_embed(text: str) -> np.ndarray:
     return np.array(response.json()["embedding"], dtype=np.float32)
 
 
+class ResponseTruncatedError(Exception):
+    """Raised by ollama_chat when Ollama's done_reason is "length" -- the
+    reply was cut off by the context/length cap rather than stopping
+    naturally. Carries whatever partial text was generated."""
+
+    def __init__(self, text: str):
+        super().__init__("response was cut off: context window limit reached")
+        self.text = text
+
+
 def ollama_chat(messages, think=False, stream_to_stdout=True):
     response = requests.post(
         f"{OLLAMA_URL}/api/chat",
@@ -269,6 +279,7 @@ def ollama_chat(messages, think=False, stream_to_stdout=True):
     )
     response.raise_for_status()
     pieces = []
+    done_reason = None
     for line in response.iter_lines():
         if not line:
             continue
@@ -279,10 +290,14 @@ def ollama_chat(messages, think=False, stream_to_stdout=True):
             if stream_to_stdout:
                 print(piece, end="", flush=True)
         if chunk.get("done"):
+            done_reason = chunk.get("done_reason")
             break
     if stream_to_stdout:
         print()
-    return "".join(pieces)
+    text = "".join(pieces)
+    if done_reason == "length":
+        raise ResponseTruncatedError(text)
+    return text
 
 
 EXTRACTION_PROMPT = (
