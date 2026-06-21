@@ -41,7 +41,7 @@ that speed complaint in mind.
 
 ```
 ~/ochat/
-  ochat.py            # the core tool — ~600 lines
+  ochat.py            # the core tool — ~670 lines
   ochat_calendar.py   # macOS Calendar.app I/O layer (AppleScript)
   tests/test_memory.py
   tests/test_calendar.py
@@ -207,13 +207,23 @@ This is what happens for every message you send, traced through `handle_turn`:
    as the original design called for ("SQLite errors during retrieval are
    caught; that turn proceeds with no relevant facts").
 3. **Build the prompt.** The system prompt (base instructions + any
-   retrieved facts) is combined with a sliding window of the most recent
-   thread messages, trimmed by `truncate_messages_to_budget` to fit an
-   8192-token estimated budget, plus your new message.
+   retrieved facts + calendar events) is combined with a sliding window of
+   the most recent thread messages, trimmed by `truncate_messages_to_budget`
+   to fit a budget computed by `effective_history_budget` — normally the
+   full 8192-token `CONTEXT_TOKEN_BUDGET`, but shrunk on any turn where this
+   turn's system prompt is large enough that it would otherwise crowd out
+   room for the model's reply within `OLLAMA_NUM_CTX` — plus your new
+   message.
 4. **Call the model.** `ollama_chat` streams the reply to your terminal as
    it's generated, with `think_param(think)` controlling reasoning depth
-   (default `off`). If this network call fails, the turn aborts the same way
-   step 1 does — no partial state is ever saved.
+   (default `off`) and `options.num_ctx` set to `OLLAMA_NUM_CTX`. If this
+   network call fails outright, the turn aborts the same way step 1 does —
+   no partial state is ever saved. If instead the reply gets cut off by
+   Ollama's context cap (`done_reason: "length"`, raised by `ollama_chat` as
+   `ResponseTruncatedError`), `handle_turn` retries once with half the
+   history budget; if the retry also gets cut off, it gives up and saves the
+   retry's partial text rather than dropping the turn, printing a warning to
+   `stderr` either way.
 5. **Persist.** Both your message and the reply are appended to the
    in-memory thread and written to disk *atomically* via `save_thread`.
 6. **Extract facts in the background.** A daemon thread is started running
@@ -310,6 +320,7 @@ ochat calendar list             # list upcoming events from macOS Calendar.app (
 | Thread file is corrupt/unparseable JSON | Renamed aside with a timestamp suffix, warning printed, fresh thread started; original bytes are preserved, never deleted |
 | `save_thread` interrupted mid-write | Impossible to corrupt the target file — writes go to a temp file first, then an atomic `os.replace` |
 | Chat or embedding request fails mid-turn | The turn aborts cleanly: nothing is appended to the thread, nothing is written to disk, you just retry |
+| Reply gets cut off by Ollama's context cap (`done_reason: "length"`) | `ollama_chat` raises `ResponseTruncatedError`; `handle_turn` retries once with half the history budget, then falls back to the retry's partial text if it's cut off again — never silently saves a truncated reply without a warning, and never drops the turn the way a genuine request failure does |
 | Long-term fact retrieval fails (e.g. a database error) | The turn does *not* abort — it proceeds with an empty fact list and a stderr warning |
 | The extraction model returns non-JSON, fenced or prose-wrapped output | `_extract_json_array` recovers the JSON in the common cases; anything still unparseable is caught and logged, never crashes |
 | Any other exception during background fact extraction | Caught by `extract_facts`'s blanket handler, logged to `extraction.log`, never propagates into the main interactive loop |
@@ -345,7 +356,7 @@ guarantees for simple dict reads/writes.
 
 ## 12. Testing
 
-88 tests: `tests/test_memory.py` (33) + `tests/test_calendar.py` (55), run via:
+95 tests: `tests/test_memory.py` (40) + `tests/test_calendar.py` (55), run via:
 
 ```bash
 uv run --with pytest --with numpy --with requests pytest tests/ -v
@@ -401,9 +412,11 @@ considered complete. Source documents:
 ochat/
   ochat.py                              # the core application
   ochat_calendar.py                     # macOS Calendar.app I/O layer
-  tests/test_memory.py                  # 33 tests
-  tests/test_calendar.py                # 52 tests
+  tests/test_memory.py                  # 40 tests
+  tests/test_calendar.py                # 55 tests
+  scripts/git-hooks/                    # post-commit/post-merge: keep the deployed clone in sync
   .gitignore
+  CLAUDE.md                             # guidance for Claude Code working in this repo
   quickuse.md                           # quick reference (this doc's companion)
   Persememory.md                        # this file
   docs/superpowers/specs/...            # design spec

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`ochat.py` is a single-file Python CLI (~600 lines) that wraps a local Ollama
+`ochat.py` is a single-file Python CLI (~670 lines) that wraps a local Ollama
 chat model with two things plain `ollama run` lacks: resumable named
 conversation threads, and a long-term fact memory recalled by semantic search
 across threads. It was built to replace a slower general-purpose agent
@@ -40,7 +40,7 @@ plan this project was built from.
 ./ochat.py memory forget <id>
 ./ochat.py calendar list         # macOS only; lists upcoming Calendar.app events
 
-# Run the full test suite (88 tests: tests/test_memory.py + tests/test_calendar.py)
+# Run the full test suite (95 tests: tests/test_memory.py + tests/test_calendar.py)
 uv run --with pytest --with numpy --with requests pytest tests/ -v
 
 # Run a single test (from either tests/test_memory.py or tests/test_calendar.py)
@@ -62,7 +62,8 @@ bottom in the source, and new code should stay within this layering:
 
 1. **Pure logic** (no I/O) — `cosine_similarity`, `top_k_facts`,
    `is_duplicate_fact`, `estimate_tokens`, `truncate_messages_to_budget`,
-   `current_datetime_context`, `looks_calendar_related`.
+   `effective_history_budget`, `current_datetime_context`,
+   `looks_calendar_related`.
    Unit-test these with plain values, no mocking.
 2. **Storage** — thread JSON files (`load_thread`/`save_thread`) and the
    SQLite fact store (`init_db`/`insert_fact`/`get_all_facts`/`delete_fact`).
@@ -237,7 +238,7 @@ functions are tested with plain values, storage functions use pytest's
 Ollama HTTP calls are mocked with `unittest.mock.patch`, asserting on actual
 request payload shape (model name, JSON body, streaming flag), not just that
 a call happened. `tests/test_calendar.py` follows the same TDD/mocking
-conventions (88 tests: tests/test_memory.py + tests/test_calendar.py): pure
+conventions (95 tests: tests/test_memory.py + tests/test_calendar.py): pure
 logic (e.g. `looks_calendar_related`, `current_datetime_context`) is tested
 directly, and `osascript` subprocess calls, `ollama_chat` intent
 classification, and `builtins.input` confirmation prompts are all mocked so
