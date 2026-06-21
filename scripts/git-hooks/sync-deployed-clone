@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Runs after any commit or merge in this repo. When main's tip has moved,
+# pushes it to origin and pulls into the deployed clone that
+# ~/.local/bin/ochat actually runs from, so that clone can never go stale
+# the way it did on 2026-06-21 (5 commits behind, including the fix for
+# replies getting cut off, for days of real usage).
+#
+# Installed via: git config core.hooksPath scripts/git-hooks
+set -euo pipefail
+
+DEPLOYED_CLONE="/Users/developer/ochat"
+
+branch=$(git branch --show-current)
+if [ "$branch" != "main" ]; then
+  exit 0
+fi
+
+echo "[sync-deployed-clone] main updated -- pushing to origin..."
+if ! git push origin main; then
+  echo "[sync-deployed-clone] push failed -- deployed clone NOT updated; resolve and re-push, then re-run this script manually" >&2
+  exit 0
+fi
+
+if [ -d "$DEPLOYED_CLONE/.git" ]; then
+  echo "[sync-deployed-clone] pulling into $DEPLOYED_CLONE..."
+  if ! git -C "$DEPLOYED_CLONE" pull --ff-only; then
+    echo "[sync-deployed-clone] pull into $DEPLOYED_CLONE failed (local changes or diverged history?) -- ochat command may still be stale, check manually" >&2
+  fi
+else
+  echo "[sync-deployed-clone] $DEPLOYED_CLONE is not a git clone -- skipping" >&2
+fi

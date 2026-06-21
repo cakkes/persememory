@@ -89,6 +89,25 @@ All runtime data lives outside the repo under `~/.local/share/ochat/`
 (`threads/<name>.json`, `memory.db`, `extraction.log`) — never under the repo
 itself.
 
+### Deployed clone — this repo is NOT what `ochat` runs
+
+This working directory is the dev repo. The `ochat` command on `$PATH` is
+`~/.local/bin/ochat`, a symlink into a **separate clone** at
+`/Users/developer/ochat/` (same GitHub remote, independent checkout). A fix
+committed and merged here does nothing for the user's actual running tool
+until it's pushed to origin and pulled into that other clone — this already
+caused one real incident (2026-06-21: a context-truncation bug was fixed
+and merged here, but the user kept hitting it because the deployed clone
+was still 5 commits behind).
+
+`scripts/git-hooks/post-commit` and `post-merge` (wired up via
+`git config core.hooksPath scripts/git-hooks`, already set in this clone)
+auto-push `main` to origin and `git pull --ff-only` it into
+`/Users/developer/ochat/` whenever main's tip moves here, specifically so
+this can't recur. A *new* clone of this repo won't have `core.hooksPath`
+set automatically (git never auto-runs hooks from a fresh clone, by
+design) — run that `git config` command once after cloning to enable it.
+
 ### Two-tier memory model
 
 - **Short-term**: the verbatim message list for the current thread, windowed
