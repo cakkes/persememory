@@ -522,12 +522,34 @@ def handle_turn(conn, thread, path, user_input, think, calendar_cache=None):
 
     try:
         system_prompt = build_system_prompt(relevant, calendar_events)
+        budget = effective_history_budget(system_prompt)
         window = truncate_messages_to_budget(
-            thread["messages"] + [{"role": "user", "content": user_input}]
+            thread["messages"] + [{"role": "user", "content": user_input}], budget
         )
         payload = [{"role": "system", "content": system_prompt}] + window
         print("ochat> ", end="", flush=True)
-        reply = ollama_chat(payload, think=think_param(think))
+        try:
+            reply = ollama_chat(payload, think=think_param(think))
+        except ResponseTruncatedError:
+            print(
+                "\nwarning: response was cut off (context limit reached); "
+                "retrying with less history...",
+                file=sys.stderr,
+            )
+            retry_window = truncate_messages_to_budget(
+                thread["messages"] + [{"role": "user", "content": user_input}], budget // 2
+            )
+            retry_payload = [{"role": "system", "content": system_prompt}] + retry_window
+            print("ochat> ", end="", flush=True)
+            try:
+                reply = ollama_chat(retry_payload, think=think_param(think))
+            except ResponseTruncatedError as exc:
+                print(
+                    "\nwarning: response was still cut off after retrying with "
+                    "less history; saving the partial reply",
+                    file=sys.stderr,
+                )
+                reply = exc.text
     except requests.RequestException as exc:
         print(f"\nerror: chat request failed ({exc}); message not saved, try again", file=sys.stderr)
         return None

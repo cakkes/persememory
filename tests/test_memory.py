@@ -381,3 +381,40 @@ def test_handle_turn_saves_thread_and_starts_extraction_on_success(tmp_path):
     assert len(thread["messages"]) == 2
     assert path.exists()
     mock_extract.assert_called_once()
+
+
+def test_handle_turn_retries_once_with_smaller_window_after_truncated_reply(tmp_path, capsys):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
+         patch("ochat.ollama_chat", side_effect=[ochat.ResponseTruncatedError("partial"), "full reply"]) as mock_chat, \
+         patch("ochat.extract_facts") as mock_extract:
+        result = ochat.handle_turn(conn, thread, path, "hello", "off")
+    assert result is not None
+    result.join(timeout=2)
+    assert mock_chat.call_count == 2
+    assert thread["messages"][1]["content"] == "full reply"
+    assert path.exists()
+    assert "cut off" in capsys.readouterr().err
+    mock_extract.assert_called_once()
+
+
+def test_handle_turn_saves_partial_reply_when_retry_also_truncated(tmp_path, capsys):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
+         patch("ochat.ollama_chat", side_effect=[
+             ochat.ResponseTruncatedError("first partial"),
+             ochat.ResponseTruncatedError("second partial"),
+         ]) as mock_chat, \
+         patch("ochat.extract_facts") as mock_extract:
+        result = ochat.handle_turn(conn, thread, path, "hello", "off")
+    assert result is not None
+    result.join(timeout=2)
+    assert mock_chat.call_count == 2
+    assert thread["messages"][1]["content"] == "second partial"
+    assert path.exists()
+    assert capsys.readouterr().err.count("cut off") == 2
+    mock_extract.assert_called_once()

@@ -183,12 +183,22 @@ the AppleScript call actually takes.
   `CONTEXT_TOKEN_BUDGET` need to stay configured (`OLLAMA_NUM_CTX` higher),
   since `CONTEXT_TOKEN_BUDGET` only bounds the sliding-window history, not
   the system prompt or the room the model needs to finish responding.
+- `handle_turn` no longer hands `truncate_messages_to_budget` a flat
+  `CONTEXT_TOKEN_BUDGET` — it calls `effective_history_budget(system_prompt)`
+  first, which shrinks the history window when that turn's system prompt is
+  big enough that `CONTEXT_TOKEN_BUDGET` worth of history plus the system
+  prompt plus `RESPONSE_TOKEN_RESERVE` would exceed `OLLAMA_NUM_CTX`. If
+  `ollama_chat` still raises `ResponseTruncatedError` (Ollama's
+  `done_reason` was `"length"`), `handle_turn` retries once with half the
+  budget; if that also gets cut off, it gives up and saves the retry's
+  partial text rather than dropping the turn, printing a warning either way.
 
 ### Configuration
 
 All tunables are plain module-level constants at the top of `ochat.py` —
 no config file. Alongside the original set (`OLLAMA_URL`, `CHAT_MODEL`,
-`EMBED_MODEL`, `CONTEXT_TOKEN_BUDGET`, `OLLAMA_NUM_CTX`, `CHARS_PER_TOKEN`, `RETRIEVAL_TOP_K`,
+`EMBED_MODEL`, `CONTEXT_TOKEN_BUDGET`, `OLLAMA_NUM_CTX`,
+`RESPONSE_TOKEN_RESERVE`, `CHARS_PER_TOKEN`, `RETRIEVAL_TOP_K`,
 `RETRIEVAL_MIN_SIMILARITY`, `DEDUP_SIMILARITY_THRESHOLD`, `DEFAULT_THINK`,
 `EXTRACTION_JOIN_TIMEOUT_SECONDS`), the calendar feature added:
 `CALENDAR_ENABLED` (`True` — master on/off switch), `CALENDAR_LOOKAHEAD_DAYS`
