@@ -160,7 +160,7 @@ schema-simple while avoiding any precision loss in the round trip.
 | `check_ollama_ready()` | Pings `/api/version`, then checks `/api/tags` for both required models. Exits the program with a clear, actionable message — never auto-pulls a model |
 | `_model_installed(required, installed_names)` | Handles Ollama's default model tagging: a required name with no tag (`"nomic-embed-text"`) matches any tagged variant installed (`"nomic-embed-text:latest"`); a required name that already specifies a tag (`"gemma4:12b"`) only matches that exact tag |
 | `ollama_embed(text)` | Calls `/api/embeddings` with the embedding model, returns a `float32` numpy vector |
-| `ollama_chat(messages, think, stream_to_stdout)` | Calls `/api/chat` with `stream: true`, parses the NDJSON response line-by-line, concatenates content chunks, and stops as soon as a chunk's `done` flag is set (verified to ignore any further lines after `done`) |
+| `ollama_chat(messages, think, stream_to_stdout)` | Calls `/api/chat` with `stream: true` and `options: {"num_ctx": OLLAMA_NUM_CTX}`, parses the NDJSON response line-by-line, concatenates content chunks, and stops as soon as a chunk's `done` flag is set (verified to ignore any further lines after `done`). The explicit `num_ctx` matters: without it Ollama loads the model at its own default context window (observed: 4096 for `gemma4:12b`, independent of the model's much larger supported `context_length`), and once a thread's history plus system prompt approaches that ceiling, `num_ctx` caps prompt+completion *combined* — leaving too few tokens for the response and forcing Ollama to cut it off mid-sentence (`done_reason: "length"`) instead of stopping naturally. `OLLAMA_NUM_CTX` is set well above `CONTEXT_TOKEN_BUDGET` for exactly this reason: that budget only bounds the sliding-window *history*, not the system prompt (facts/calendar bullets) or the room the model needs to actually finish talking |
 | `think_param(level)` | Maps a CLI string (`"off"`, `"on"`/`"true"`, or a level name) to the value Ollama's `think` API field expects |
 
 ### Background fact extraction
@@ -273,6 +273,7 @@ change any of these:
 | `CHAT_MODEL` | `gemma4:12b` | The model used for chat and fact extraction |
 | `EMBED_MODEL` | `nomic-embed-text` | The model used to embed facts and queries |
 | `CONTEXT_TOKEN_BUDGET` | `8192` | Approximate token budget for the sliding-window history sent per turn |
+| `OLLAMA_NUM_CTX` | `16384` | The actual Ollama context window requested via `options.num_ctx` on every `ollama_chat` call. Kept above `CONTEXT_TOKEN_BUDGET` so the system prompt and the model's response still have room once the windowed history fills its budget; without this, Ollama silently falls back to its own default context window (4096 for `gemma4:12b`), which is smaller than `CONTEXT_TOKEN_BUDGET` itself and causes long-running threads to get cut off mid-response |
 | `CHARS_PER_TOKEN` | `4` | The token-estimation heuristic (`len(text) // 4`) |
 | `RETRIEVAL_TOP_K` | `8` | Max number of long-term facts injected into the system prompt per turn |
 | `RETRIEVAL_MIN_SIMILARITY` | `0.45` | Minimum cosine similarity for a fact to be considered relevant |

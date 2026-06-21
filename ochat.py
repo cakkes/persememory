@@ -29,6 +29,7 @@ MEMORY_DB_PATH = DATA_DIR / "memory.db"
 EXTRACTION_LOG_PATH = DATA_DIR / "extraction.log"
 
 CONTEXT_TOKEN_BUDGET = 8192
+OLLAMA_NUM_CTX = 16384
 CHARS_PER_TOKEN = 4
 RETRIEVAL_TOP_K = 8
 RETRIEVAL_MIN_SIMILARITY = 0.45
@@ -248,7 +249,13 @@ def ollama_embed(text: str) -> np.ndarray:
 def ollama_chat(messages, think=False, stream_to_stdout=True):
     response = requests.post(
         f"{OLLAMA_URL}/api/chat",
-        json={"model": CHAT_MODEL, "messages": messages, "stream": True, "think": think},
+        json={
+            "model": CHAT_MODEL,
+            "messages": messages,
+            "stream": True,
+            "think": think,
+            "options": {"num_ctx": OLLAMA_NUM_CTX},
+        },
         stream=True,
         timeout=120,
     )

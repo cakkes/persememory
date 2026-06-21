@@ -172,12 +172,23 @@ the AppleScript call actually takes.
   (`<name>.json.corrupt-<timestamp>`) and starts fresh.
 - `check_ollama_ready` never auto-pulls a missing model; it always prints the
   exact `ollama pull <model>` command and exits.
+- `ollama_chat` always sends `options: {"num_ctx": OLLAMA_NUM_CTX}`. Without
+  it, Ollama loads the model at its own default context window (observed:
+  4096 for `gemma4:12b`, far below the model's actual supported
+  `context_length`), and since `num_ctx` caps prompt+completion *combined*,
+  a long thread's history plus system prompt can crowd out nearly all of it,
+  leaving too few tokens for the response and forcing Ollama to cut it off
+  mid-sentence (`done_reason: "length"`). This was a real bug found via a
+  live thread that had grown to 44 messages — both `OLLAMA_NUM_CTX` and
+  `CONTEXT_TOKEN_BUDGET` need to stay configured (`OLLAMA_NUM_CTX` higher),
+  since `CONTEXT_TOKEN_BUDGET` only bounds the sliding-window history, not
+  the system prompt or the room the model needs to finish responding.
 
 ### Configuration
 
 All tunables are plain module-level constants at the top of `ochat.py` —
 no config file. Alongside the original set (`OLLAMA_URL`, `CHAT_MODEL`,
-`EMBED_MODEL`, `CONTEXT_TOKEN_BUDGET`, `CHARS_PER_TOKEN`, `RETRIEVAL_TOP_K`,
+`EMBED_MODEL`, `CONTEXT_TOKEN_BUDGET`, `OLLAMA_NUM_CTX`, `CHARS_PER_TOKEN`, `RETRIEVAL_TOP_K`,
 `RETRIEVAL_MIN_SIMILARITY`, `DEDUP_SIMILARITY_THRESHOLD`, `DEFAULT_THINK`,
 `EXTRACTION_JOIN_TIMEOUT_SECONDS`), the calendar feature added:
 `CALENDAR_ENABLED` (`True` — master on/off switch), `CALENDAR_LOOKAHEAD_DAYS`

@@ -209,6 +209,18 @@ def test_ollama_chat_streams_and_concatenates_content(capsys):
     assert "Hello" in capsys.readouterr().out
 
 
+def test_ollama_chat_sets_num_ctx_so_long_threads_dont_get_cut_off():
+    fake_response = MagicMock()
+    fake_response.raise_for_status.return_value = None
+    fake_response.iter_lines.return_value = [
+        json.dumps({"message": {"content": "hi"}, "done": True}).encode(),
+    ]
+    with patch("ochat.requests.post", return_value=fake_response) as mock_post:
+        ochat.ollama_chat([{"role": "user", "content": "hi"}], think=False, stream_to_stdout=False)
+    assert mock_post.call_args.kwargs["json"]["options"]["num_ctx"] == ochat.OLLAMA_NUM_CTX
+    assert ochat.OLLAMA_NUM_CTX > ochat.CONTEXT_TOKEN_BUDGET
+
+
 def test_extract_facts_inserts_new_non_duplicate_facts(tmp_path):
     conn = ochat.init_db(tmp_path / "memory.db")
     with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
