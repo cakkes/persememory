@@ -366,6 +366,23 @@ def test_build_system_prompt_includes_fact_bullets():
     assert "- likes terse answers" in prompt
 
 
+def test_build_system_prompt_includes_tool_names_and_use_instruction_when_tools_given():
+    tools = [
+        {"type": "function", "function": {"name": "web_search", "description": "Search the web"}},
+        {"type": "function", "function": {"name": "read_file", "description": "Read a file"}},
+    ]
+    prompt = ochat.build_system_prompt([], tools=tools)
+    assert "web_search" in prompt
+    assert "read_file" in prompt
+    assert "tool" in prompt.lower()
+
+
+def test_build_system_prompt_with_no_tools_has_no_tools_section():
+    prompt = ochat.build_system_prompt([], tools=None)
+    assert "web_search" not in prompt
+    assert "Tools" not in prompt
+
+
 def test_build_system_prompt_includes_current_datetime_context():
     prompt = ochat.build_system_prompt([])
     assert "Current date/time:" in prompt

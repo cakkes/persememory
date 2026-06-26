@@ -484,7 +484,7 @@ def extract_facts(conn, user_message: str, assistant_message: str, source_thread
         log_extraction_error(exc)
 
 
-def build_system_prompt(relevant_facts):
+def build_system_prompt(relevant_facts, tools=None):
     sections = [
         "You are a helpful assistant talking with the user in their terminal.\n\n"
         f"{current_datetime_context()}\n"
@@ -496,6 +496,17 @@ def build_system_prompt(relevant_facts):
         "this thread spans multiple days — always use the date/time above, not any "
         "date mentioned in prior messages."
     ]
+    if tools:
+        lines = "\n".join(
+            f"- {t['function']['name']}: {t['function']['description']}"
+            for t in tools
+        )
+        sections.append(
+            "You have access to the following tools. Call them whenever the user's "
+            "request would benefit from real-time data, file access, or any capability "
+            "listed below — do not say you lack the ability when a tool covers it:\n"
+            + lines
+        )
     if relevant_facts:
         bullets = "\n".join(f"- {fact['text']}" for fact in relevant_facts)
         sections.append(f"Relevant memory:\n{bullets}")
@@ -516,7 +527,9 @@ def handle_turn(conn, thread, path, user_input, think):
         relevant = []
 
     try:
-        system_prompt = build_system_prompt(relevant)
+        tools_active = ochat_tools is not None and bool(ochat_tools.all_tools())
+        tool_schemas = ochat_tools.get_ollama_tools() if tools_active else None
+        system_prompt = build_system_prompt(relevant, tools=tool_schemas)
         budget = effective_history_budget(system_prompt)
         think_val = think_param(think)
         # Prefix the outgoing user message with the current date/time so the model
@@ -528,8 +541,6 @@ def handle_turn(conn, thread, path, user_input, think):
             thread["messages"] + [{"role": "user", "content": dated_user_msg}], budget
         )
         payload = [{"role": "system", "content": system_prompt}] + window
-
-        tools_active = ochat_tools is not None and bool(ochat_tools.all_tools())
 
         if tools_active:
             def _chat_fn(msgs, tools):
@@ -610,6 +621,10 @@ def run_chat_loop(thread_name: str, think: str) -> None:
     thread = load_thread(path, thread_name)
     if ochat_tools is not None:
         ochat_tools.init_tools()
+        active_tools = ochat_tools.all_tools()
+        if active_tools:
+            names = ", ".join(t.name for t in active_tools)
+            print(f"[tools: {names}]")
     pending_extraction = None
     try:
         while True:
