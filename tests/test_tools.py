@@ -185,6 +185,39 @@ def test_web_search_returns_abstract_text_from_ddg():
     assert "Manila" in result
 
 
+def test_web_search_uses_brave_api_when_key_is_set():
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {
+        "web": {"results": [
+            {"title": "2026 NBA Draft", "description": "Warriors selected player X at pick 11."},
+            {"title": "NBA Draft results", "description": "Full list of picks from tonight."},
+        ]}
+    }
+    with patch.dict("os.environ", {"BRAVE_API_KEY": "test-key-abc"}), \
+         patch("ochat_tools._requests.get", return_value=fake_resp) as mock_get:
+        result = ochat_tools._web_search("2026 NBA Draft Warriors")
+    # Must call Brave endpoint with the key header
+    call_args = mock_get.call_args
+    assert "api.search.brave.com" in call_args.args[0]
+    assert call_args.kwargs["headers"]["X-Subscription-Token"] == "test-key-abc"
+    assert "Warriors" in result or "NBA Draft" in result
+
+
+def test_web_search_skips_brave_when_no_key_set():
+    fake_resp = MagicMock()
+    fake_resp.raise_for_status = MagicMock()
+    fake_resp.json.return_value = {"AbstractText": "DuckDuckGo result", "RelatedTopics": []}
+    with patch.dict("os.environ", {}, clear=True), \
+         patch("ochat_tools._requests.get", return_value=fake_resp) as mock_get:
+        # Remove key if present in env
+        import os
+        os.environ.pop("BRAVE_API_KEY", None)
+        result = ochat_tools._web_search("test query")
+    call_args = mock_get.call_args
+    assert "brave" not in call_args.args[0].lower()
+
+
 def test_web_search_falls_back_to_html_results_when_instant_answer_empty():
     # DuckDuckGo's Instant Answer API returns no AbstractText for live events
     # (e.g. breaking sports news). The fallback must scrape HTML search results.

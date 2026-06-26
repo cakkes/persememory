@@ -111,10 +111,44 @@ def execute_tool(
 # ---------------------------------------------------------------------------
 
 def _web_search(query: str) -> str:
+    brave_key = os.environ.get("BRAVE_API_KEY", "").strip()
+    if brave_key:
+        return _brave_search(query, brave_key)
+    return _duckduckgo_search(query)
+
+
+def _brave_search(query: str, api_key: str) -> str:
+    try:
+        resp = _requests.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={"q": query, "count": 5, "text_decorations": "false"},
+            headers={
+                "Accept": "application/json",
+                "X-Subscription-Token": api_key,
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        results_raw = data.get("web", {}).get("results", [])
+        parts: list[str] = []
+        for r in results_raw[:5]:
+            title = r.get("title", "").strip()
+            desc = r.get("description", "").strip()
+            if title and desc:
+                parts.append(f"{title}: {desc}")
+            elif title or desc:
+                parts.append(title or desc)
+        return "\n".join(parts) if parts else "No results found."
+    except Exception as exc:
+        return f"Web search failed: {exc}"
+
+
+def _duckduckgo_search(query: str) -> str:
     import html as _html
     import re as _re
 
-    # Try the Instant Answer API first — fast and structured for well-known facts.
+    # Try the Instant Answer API — works for well-known facts.
     try:
         resp = _requests.get(
             "https://api.duckduckgo.com/",
@@ -134,7 +168,7 @@ def _web_search(query: str) -> str:
     except Exception:
         pass
 
-    # Fallback: scrape the HTML search page for real-time results (live events, news).
+    # Fallback: scrape HTML search page.
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
         resp = _requests.get(
@@ -199,7 +233,7 @@ def _run_shell(command: str) -> str:
 BUILTIN_TOOLS: dict[str, ToolDef] = {
     "web_search": ToolDef(
         name="web_search",
-        description="Search the web for current information using DuckDuckGo.",
+        description="Search the web for current information, including live events, news, and recent data.",
         parameters={
             "type": "object",
             "properties": {"query": {"type": "string", "description": "The search query"}},
