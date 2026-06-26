@@ -550,3 +550,35 @@ def test_build_system_prompt_warns_that_older_messages_may_reference_a_different
     # the model to disregard date/time references in history and use the injected value.
     prompt = ochat.build_system_prompt([])
     assert "older messages" in prompt.lower() or "previous messages" in prompt.lower() or "earlier messages" in prompt.lower()
+
+
+def test_handle_turn_prefixes_user_message_with_datetime_in_payload_but_not_in_thread(tmp_path):
+    # Bug: system prompt date instruction alone is insufficient — Gemma4's conversation-
+    # coherence bias overrides it when old messages in history state a different date.
+    # Injecting the date directly into the outgoing user message (not persisted) gives the
+    # model an authoritative date signal right before it generates its reply.
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": [
+        {"role": "user", "content": "hi", "ts": "t1"},
+        {"role": "assistant", "content": "It is 9:33 AM on June 21, 2026.", "ts": "t2"},
+    ]}
+    path = tmp_path / "t.json"
+    captured_payloads = []
+
+    def fake_chat(messages, **kwargs):
+        captured_payloads.append(messages)
+        return "today reply"
+
+    with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
+         patch("ochat.ollama_chat", side_effect=fake_chat), \
+         patch("ochat.extract_facts"):
+        result = ochat.handle_turn(conn, thread, path, "what day is it?", "off")
+
+    result.join(timeout=2)
+    # The payload's last user message must contain the injected datetime
+    last_user_msg = next(
+        m for m in reversed(captured_payloads[0]) if m["role"] == "user"
+    )
+    assert "current date" in last_user_msg["content"].lower() or "date/time" in last_user_msg["content"].lower()
+    # The thread must store the original clean user input, not the dated version
+    assert thread["messages"][-2]["content"] == "what day is it?"

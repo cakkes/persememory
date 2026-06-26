@@ -491,8 +491,13 @@ def handle_turn(conn, thread, path, user_input, think):
         system_prompt = build_system_prompt(relevant)
         budget = effective_history_budget(system_prompt)
         think_val = think_param(think)
+        # Prefix the outgoing user message with the current date/time so the model
+        # sees an authoritative date signal right before it replies — necessary because
+        # Gemma4's conversation-coherence bias overrides system-prompt-only date
+        # instructions when old thread messages state a different date.
+        dated_user_msg = f"[{current_datetime_context()}]\n{user_input}"
         window = truncate_messages_to_budget(
-            thread["messages"] + [{"role": "user", "content": user_input}], budget
+            thread["messages"] + [{"role": "user", "content": dated_user_msg}], budget
         )
         payload = [{"role": "system", "content": system_prompt}] + window
         print("ochat> ", end="", flush=True)
@@ -505,7 +510,7 @@ def handle_turn(conn, thread, path, user_input, think):
                 file=sys.stderr,
             )
             retry_window = truncate_messages_to_budget(
-                thread["messages"] + [{"role": "user", "content": user_input}], budget // 2
+                thread["messages"] + [{"role": "user", "content": dated_user_msg}], budget // 2
             )
             if retry_window == window:
                 # Halving the budget produced the same window — a retry cannot help.
