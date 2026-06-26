@@ -377,6 +377,15 @@ def test_build_system_prompt_includes_tool_names_and_use_instruction_when_tools_
     assert "tool" in prompt.lower()
 
 
+def test_build_system_prompt_tool_section_does_not_use_echoed_phrase():
+    # Gemma4 echoes "You have access to the following tools. Call them whenever..."
+    # verbatim as its first response token stream. The tool section must use a
+    # different format (e.g. XML tags) so the model treats it as config, not prose.
+    tools = [{"type": "function", "function": {"name": "web_search", "description": "Search"}}]
+    prompt = ochat.build_system_prompt([], tools=tools)
+    assert "You have access to the following tools" not in prompt
+
+
 def test_build_system_prompt_with_no_tools_has_no_tools_section():
     prompt = ochat.build_system_prompt([], tools=None)
     assert "web_search" not in prompt

@@ -185,6 +185,29 @@ def test_web_search_returns_abstract_text_from_ddg():
     assert "Manila" in result
 
 
+def test_web_search_falls_back_to_html_results_when_instant_answer_empty():
+    # DuckDuckGo's Instant Answer API returns no AbstractText for live events
+    # (e.g. breaking sports news). The fallback must scrape HTML search results.
+    empty_json = MagicMock()
+    empty_json.raise_for_status = MagicMock()
+    empty_json.json.return_value = {"AbstractText": "", "RelatedTopics": []}
+
+    html_resp = MagicMock()
+    html_resp.raise_for_status = MagicMock()
+    html_resp.text = """
+    <html><body>
+      <a class="result__a" href="#">2026 NBA Draft Results</a>
+      <a class="result__snippet" href="#">The 11th pick in the 2026 NBA Draft was announced live.</a>
+      <a class="result__a" href="#">NBA Draft picks tonight</a>
+      <a class="result__snippet" href="#">Full results from the 2026 NBA Draft ceremony.</a>
+    </body></html>
+    """
+
+    with patch("ochat_tools._requests.get", side_effect=[empty_json, html_resp]):
+        result = ochat_tools._web_search("2026 NBA Draft pick 11")
+    assert "2026 NBA Draft" in result or "pick" in result.lower()
+
+
 def test_web_search_returns_error_string_on_network_failure():
     with patch("ochat_tools._requests.get", side_effect=Exception("timeout")):
         result = ochat_tools._web_search("anything")

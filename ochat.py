@@ -498,14 +498,16 @@ def build_system_prompt(relevant_facts, tools=None):
     ]
     if tools:
         lines = "\n".join(
-            f"- {t['function']['name']}: {t['function']['description']}"
+            f"  {t['function']['name']}: {t['function']['description']}"
             for t in tools
         )
         sections.append(
-            "You have access to the following tools. Call them whenever the user's "
-            "request would benefit from real-time data, file access, or any capability "
-            "listed below — do not say you lack the ability when a tool covers it:\n"
+            "<tools>\n"
             + lines
+            + "\n</tools>\n"
+            "Call these tools automatically when the request needs real-time data or "
+            "any capability listed above. Never tell the user you lack a capability "
+            "that a tool above provides."
         )
     if relevant_facts:
         bullets = "\n".join(f"- {fact['text']}" for fact in relevant_facts)

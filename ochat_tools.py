@@ -111,6 +111,10 @@ def execute_tool(
 # ---------------------------------------------------------------------------
 
 def _web_search(query: str) -> str:
+    import html as _html
+    import re as _re
+
+    # Try the Instant Answer API first — fast and structured for well-known facts.
     try:
         resp = _requests.get(
             "https://api.duckduckgo.com/",
@@ -125,7 +129,31 @@ def _web_search(query: str) -> str:
         for topic in data.get("RelatedTopics", [])[:5]:
             if isinstance(topic, dict) and topic.get("Text"):
                 parts.append(topic["Text"])
-        return "\n".join(parts) if parts else "No results found."
+        if parts:
+            return "\n".join(parts)
+    except Exception:
+        pass
+
+    # Fallback: scrape the HTML search page for real-time results (live events, news).
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"}
+        resp = _requests.get(
+            "https://html.duckduckgo.com/html/",
+            params={"q": query},
+            headers=headers,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        text = resp.text
+        titles = _re.findall(r'class="result__a"[^>]*>(.*?)</a>', text, _re.DOTALL)
+        snippets = _re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', text, _re.DOTALL)
+        results: list[str] = []
+        for title, snippet in zip(titles[:5], snippets[:5]):
+            clean_t = _html.unescape(_re.sub(r"<[^>]+>", "", title).strip())
+            clean_s = _html.unescape(_re.sub(r"<[^>]+>", "", snippet).strip())
+            if clean_t or clean_s:
+                results.append(f"{clean_t}: {clean_s}" if clean_t and clean_s else clean_t or clean_s)
+        return "\n".join(results) if results else "No results found."
     except Exception as exc:
         return f"Web search failed: {exc}"
 
