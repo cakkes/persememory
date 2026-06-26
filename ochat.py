@@ -333,26 +333,40 @@ class ResponseTruncatedError(Exception):
 
 
 def ollama_chat_raw(messages, tools=None, think=False):
-    """Non-streaming chat call used for tool-detection turns.
-    Returns (text, tool_calls | None) — tool_calls is the list from the
-    model's message when it decides to call a function, or None for plain text.
+    """Streaming chat call used for tool-detection turns.
+    Buffers all chunks so the read timeout can't fire mid-generation.
+    Returns (text, tool_calls | None).
     """
     body = {
         "model": CHAT_MODEL,
         "messages": messages,
-        "stream": False,
+        "stream": True,
         "think": think,
         "options": {"num_ctx": OLLAMA_NUM_CTX},
     }
     if tools:
         body["tools"] = tools
-    response = requests.post(f"{OLLAMA_URL}/api/chat", json=body, timeout=120)
+    response = requests.post(f"{OLLAMA_URL}/api/chat", json=body, stream=True, timeout=120)
     response.raise_for_status()
-    data = response.json()
-    message = data.get("message", {})
-    text = message.get("content", "")
-    tool_calls = message.get("tool_calls") or None
-    return text, tool_calls
+    pieces = []
+    tool_calls = None
+    done_reason = None
+    for line in response.iter_lines():
+        if not line:
+            continue
+        chunk = json.loads(line)
+        msg = chunk.get("message", {})
+        if msg.get("content"):
+            pieces.append(msg["content"])
+        if msg.get("tool_calls"):
+            tool_calls = msg["tool_calls"]
+        if chunk.get("done"):
+            done_reason = chunk.get("done_reason")
+            break
+    text = "".join(pieces)
+    if done_reason == "length":
+        raise ResponseTruncatedError(text)
+    return text, tool_calls or None
 
 
 def ollama_chat(messages, think=False, stream_to_stdout=True):

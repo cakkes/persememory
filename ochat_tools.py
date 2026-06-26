@@ -214,6 +214,33 @@ def _write_file(path: str, content: str) -> str:
         return f"Error writing file: {exc}"
 
 
+def _run_python(code: str) -> str:
+    import tempfile
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(code)
+            tmp_path = f.name
+        result = subprocess.run(
+            ["python3", tmp_path], capture_output=True, text=True, timeout=30
+        )
+        out = result.stdout.strip()
+        err = result.stderr.strip()
+        if result.returncode != 0:
+            return f"Exit {result.returncode}\n{err or out}"
+        return out or "(no output)"
+    except subprocess.TimeoutExpired:
+        return "Error: Python script timed out after 30 seconds"
+    except Exception as exc:
+        return f"Error running Python: {exc}"
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+
 def _run_shell(command: str) -> str:
     try:
         result = subprocess.run(
@@ -276,6 +303,17 @@ BUILTIN_TOOLS: dict[str, ToolDef] = {
             "required": ["command"],
         },
         fn=_run_shell,
+        dangerous=True,
+    ),
+    "run_python": ToolDef(
+        name="run_python",
+        description="Write and execute a Python script, returning its stdout/stderr output.",
+        parameters={
+            "type": "object",
+            "properties": {"code": {"type": "string", "description": "Python source code to execute"}},
+            "required": ["code"],
+        },
+        fn=_run_python,
         dangerous=True,
     ),
 }

@@ -185,6 +185,34 @@ def test_web_search_returns_abstract_text_from_ddg():
     assert "Manila" in result
 
 
+def test_run_python_executes_code_and_returns_stdout():
+    result = ochat_tools._run_python("print('hello world')")
+    assert result == "hello world"
+
+
+def test_run_python_returns_stderr_on_error():
+    result = ochat_tools._run_python("raise ValueError('bad input')")
+    assert "ValueError" in result or "bad input" in result
+
+
+def test_run_python_returns_exit_code_on_failure():
+    result = ochat_tools._run_python("import sys; sys.exit(1)")
+    assert "Exit 1" in result or result.strip() != ""
+
+
+def test_run_python_times_out_gracefully():
+    result = ochat_tools._run_python("import time; time.sleep(999)")
+    assert "timed out" in result.lower() or "timeout" in result.lower()
+
+
+def test_run_python_is_marked_dangerous():
+    assert ochat_tools.BUILTIN_TOOLS["run_python"].dangerous is True
+
+
+def test_run_python_in_builtin_tools_dict():
+    assert "run_python" in ochat_tools.BUILTIN_TOOLS
+
+
 def test_web_search_uses_brave_api_when_key_is_set():
     fake_resp = MagicMock()
     fake_resp.raise_for_status = MagicMock()
@@ -248,7 +276,7 @@ def test_web_search_returns_error_string_on_network_failure():
 
 
 def test_builtin_tools_dict_has_expected_names():
-    assert set(ochat_tools.BUILTIN_TOOLS) == {"web_search", "read_file", "write_file", "run_shell"}
+    assert set(ochat_tools.BUILTIN_TOOLS) == {"web_search", "read_file", "write_file", "run_shell", "run_python"}
 
 
 def test_write_file_and_run_shell_are_marked_dangerous():

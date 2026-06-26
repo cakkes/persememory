@@ -267,6 +267,54 @@ def test_ollama_chat_raises_response_truncated_error_when_done_reason_is_length(
     assert exc_info.value.text == "Hello"
 
 
+def test_ollama_chat_raw_uses_streaming_to_avoid_read_timeout():
+    """ollama_chat_raw must stream so long generations don't hit the 120s read timeout."""
+    tool_call = {"function": {"name": "web_search", "arguments": {"query": "NBA"}}}
+    fake_response = MagicMock()
+    fake_response.raise_for_status.return_value = None
+    fake_response.iter_lines.return_value = [
+        json.dumps({"message": {"content": "Thinking...", "tool_calls": [tool_call]}, "done": False}).encode(),
+        json.dumps({"message": {"content": ""}, "done": True, "done_reason": "stop"}).encode(),
+    ]
+    with patch("ochat.requests.post", return_value=fake_response) as mock_post:
+        text, calls = ochat.ollama_chat_raw(
+            [{"role": "user", "content": "search for nba"}],
+            tools=[{"type": "function", "function": {"name": "web_search"}}],
+        )
+    # Must request streaming so the connection stays alive during generation
+    assert mock_post.call_args.kwargs.get("stream") is True
+    assert mock_post.call_args.kwargs["json"]["stream"] is True
+    assert calls == [tool_call]
+    assert text == "Thinking..."
+
+
+def test_ollama_chat_raw_returns_plain_text_and_none_when_no_tool_calls():
+    fake_response = MagicMock()
+    fake_response.raise_for_status.return_value = None
+    fake_response.iter_lines.return_value = [
+        json.dumps({"message": {"content": "Sure, "}, "done": False}).encode(),
+        json.dumps({"message": {"content": "here you go."}, "done": False}).encode(),
+        json.dumps({"message": {"content": ""}, "done": True, "done_reason": "stop"}).encode(),
+    ]
+    with patch("ochat.requests.post", return_value=fake_response):
+        text, calls = ochat.ollama_chat_raw([{"role": "user", "content": "hi"}])
+    assert text == "Sure, here you go."
+    assert calls is None
+
+
+def test_ollama_chat_raw_raises_response_truncated_error_on_length():
+    fake_response = MagicMock()
+    fake_response.raise_for_status.return_value = None
+    fake_response.iter_lines.return_value = [
+        json.dumps({"message": {"content": "partial"}, "done": False}).encode(),
+        json.dumps({"message": {"content": ""}, "done": True, "done_reason": "length"}).encode(),
+    ]
+    with patch("ochat.requests.post", return_value=fake_response):
+        with pytest.raises(ochat.ResponseTruncatedError) as exc_info:
+            ochat.ollama_chat_raw([{"role": "user", "content": "hi"}])
+    assert exc_info.value.text == "partial"
+
+
 def test_extract_json_array_unchanged_behavior():
     text = '```json\n["fact one"]\n```'
     assert ochat._extract_json_array(text) == '["fact one"]'
