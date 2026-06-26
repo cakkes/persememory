@@ -19,6 +19,11 @@ from pathlib import Path
 import numpy as np
 import requests
 
+try:
+    import ochat_tools
+except ImportError:
+    ochat_tools = None  # type: ignore[assignment]
+
 OLLAMA_URL = "http://127.0.0.1:11434"
 CHAT_MODEL = "gemma4:12b"
 EMBED_MODEL = "nomic-embed-text"
@@ -327,6 +332,29 @@ class ResponseTruncatedError(Exception):
         self.text = text
 
 
+def ollama_chat_raw(messages, tools=None, think=False):
+    """Non-streaming chat call used for tool-detection turns.
+    Returns (text, tool_calls | None) — tool_calls is the list from the
+    model's message when it decides to call a function, or None for plain text.
+    """
+    body = {
+        "model": CHAT_MODEL,
+        "messages": messages,
+        "stream": False,
+        "think": think,
+        "options": {"num_ctx": OLLAMA_NUM_CTX},
+    }
+    if tools:
+        body["tools"] = tools
+    response = requests.post(f"{OLLAMA_URL}/api/chat", json=body, timeout=120)
+    response.raise_for_status()
+    data = response.json()
+    message = data.get("message", {})
+    text = message.get("content", "")
+    tool_calls = message.get("tool_calls") or None
+    return text, tool_calls
+
+
 def ollama_chat(messages, think=False, stream_to_stdout=True):
     response = requests.post(
         f"{OLLAMA_URL}/api/chat",
@@ -500,37 +528,60 @@ def handle_turn(conn, thread, path, user_input, think):
             thread["messages"] + [{"role": "user", "content": dated_user_msg}], budget
         )
         payload = [{"role": "system", "content": system_prompt}] + window
-        print("ochat> ", end="", flush=True)
-        try:
-            reply = ollama_chat(payload, think=think_val)
-        except ResponseTruncatedError as exc_first:
-            print(
-                "\nwarning: response was cut off (context limit reached); "
-                "retrying with less history...",
-                file=sys.stderr,
-            )
-            retry_window = truncate_messages_to_budget(
-                thread["messages"] + [{"role": "user", "content": dated_user_msg}], budget // 2
-            )
-            if retry_window == window:
-                # Halving the budget produced the same window — a retry cannot help.
-                print(
-                    "\nwarning: history already at minimum; saving partial reply",
-                    file=sys.stderr,
-                )
-                reply = exc_first.text
-            else:
-                retry_payload = [{"role": "system", "content": system_prompt}] + retry_window
+
+        tools_active = ochat_tools is not None and bool(ochat_tools.all_tools())
+
+        if tools_active:
+            def _chat_fn(msgs, tools):
+                if tools:
+                    # Tool-detection turn — non-streaming so we can inspect tool_calls
+                    return ollama_chat_raw(msgs, tools=tools, think=think_val)
+                # Final answer turn — stream to stdout as normal
                 print("ochat> ", end="", flush=True)
                 try:
-                    reply = ollama_chat(retry_payload, think=think_val)
+                    text = ollama_chat(msgs, think=think_val)
+                    return text, None
                 except ResponseTruncatedError as exc:
                     print(
-                        "\nwarning: response was still cut off after retrying with "
-                        "less history; saving the partial reply",
+                        "\nwarning: response was cut off; saving partial reply",
                         file=sys.stderr,
                     )
-                    reply = exc.text
+                    return exc.text, None
+
+            print("ochat> ", end="", flush=True)
+            reply = ochat_tools.run_tool_loop(payload, _chat_fn)
+        else:
+            print("ochat> ", end="", flush=True)
+            try:
+                reply = ollama_chat(payload, think=think_val)
+            except ResponseTruncatedError as exc_first:
+                print(
+                    "\nwarning: response was cut off (context limit reached); "
+                    "retrying with less history...",
+                    file=sys.stderr,
+                )
+                retry_window = truncate_messages_to_budget(
+                    thread["messages"] + [{"role": "user", "content": dated_user_msg}], budget // 2
+                )
+                if retry_window == window:
+                    # Halving the budget produced the same window — a retry cannot help.
+                    print(
+                        "\nwarning: history already at minimum; saving partial reply",
+                        file=sys.stderr,
+                    )
+                    reply = exc_first.text
+                else:
+                    retry_payload = [{"role": "system", "content": system_prompt}] + retry_window
+                    print("ochat> ", end="", flush=True)
+                    try:
+                        reply = ollama_chat(retry_payload, think=think_val)
+                    except ResponseTruncatedError as exc:
+                        print(
+                            "\nwarning: response was still cut off after retrying with "
+                            "less history; saving the partial reply",
+                            file=sys.stderr,
+                        )
+                        reply = exc.text
     except requests.RequestException as exc:
         print(f"\nerror: chat request failed ({exc}); message not saved, try again", file=sys.stderr)
         return None
@@ -552,6 +603,8 @@ def run_chat_loop(thread_name: str, think: str) -> None:
     conn = init_db(MEMORY_DB_PATH)
     path = thread_path(thread_name)
     thread = load_thread(path, thread_name)
+    if ochat_tools is not None:
+        ochat_tools.init_tools()
     pending_extraction = None
     try:
         while True:
@@ -568,6 +621,8 @@ def run_chat_loop(thread_name: str, think: str) -> None:
     finally:
         if pending_extraction is not None:
             pending_extraction.join(timeout=EXTRACTION_JOIN_TIMEOUT_SECONDS)
+        if ochat_tools is not None:
+            ochat_tools.shutdown_tools()
 
 
 def cmd_threads() -> None:
