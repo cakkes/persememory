@@ -541,3 +541,12 @@ def test_save_thread_writes_compact_json_without_indentation(tmp_path):
     ochat.save_thread(path, thread)
     raw = path.read_text()
     assert "  " not in raw
+
+
+def test_build_system_prompt_warns_that_older_messages_may_reference_a_different_date():
+    # Bug: threads spanning multiple days contain old assistant messages that state a prior
+    # date. Gemma4's conversation-coherence bias causes it to repeat the old date rather
+    # than the correct one from the system prompt. The system prompt must explicitly instruct
+    # the model to disregard date/time references in history and use the injected value.
+    prompt = ochat.build_system_prompt([])
+    assert "older messages" in prompt.lower() or "previous messages" in prompt.lower() or "earlier messages" in prompt.lower()

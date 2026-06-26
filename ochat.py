@@ -463,7 +463,10 @@ def build_system_prompt(relevant_facts):
         "This is real, current information from the user's system clock, not a "
         "guess or a memory. When asked what the current date or time is, answer "
         "directly using the value above — never say you lack real-time access "
-        "or a live clock; you have been given it right here."
+        "or a live clock; you have been given it right here. "
+        "Older messages in this conversation may reference a different date because "
+        "this thread spans multiple days — always use the date/time above, not any "
+        "date mentioned in prior messages."
     ]
     if relevant_facts:
         bullets = "\n".join(f"- {fact['text']}" for fact in relevant_facts)
