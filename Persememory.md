@@ -41,10 +41,8 @@ that speed complaint in mind.
 
 ```
 ~/ochat/
-  ochat.py            # the core tool — ~670 lines
-  ochat_calendar.py   # macOS Calendar.app I/O layer (AppleScript)
+  ochat.py            # the core tool — ~510 lines
   tests/test_memory.py
-  tests/test_calendar.py
 ```
 
 `ochat.py` opens with a `uv run --script` shebang and a PEP 723 inline
@@ -161,8 +159,8 @@ schema-simple while avoiding any precision loss in the round trip.
 | `check_ollama_ready()` | Pings `/api/version`, then checks `/api/tags` for both required models. Exits the program with a clear, actionable message — never auto-pulls a model |
 | `_model_installed(required, installed_names)` | Handles Ollama's default model tagging: a required name with no tag (`"nomic-embed-text"`) matches any tagged variant installed (`"nomic-embed-text:latest"`); a required name that already specifies a tag (`"gemma4:12b"`) only matches that exact tag |
 | `ollama_embed(text)` | Calls `/api/embeddings` with the embedding model, returns a `float32` numpy vector |
-| `ollama_chat(messages, think, stream_to_stdout)` | Calls `/api/chat` with `stream: true` and `options: {"num_ctx": OLLAMA_NUM_CTX}`, parses the NDJSON response line-by-line, concatenates content chunks, and stops as soon as a chunk's `done` flag is set (verified to ignore any further lines after `done`). The explicit `num_ctx` matters: without it Ollama loads the model at its own default context window (observed: 4096 for `gemma4:12b`, independent of the model's much larger supported `context_length`), and once a thread's history plus system prompt approaches that ceiling, `num_ctx` caps prompt+completion *combined* — leaving too few tokens for the response and forcing Ollama to cut it off mid-sentence (`done_reason: "length"`) instead of stopping naturally. `OLLAMA_NUM_CTX` is set well above `CONTEXT_TOKEN_BUDGET` for exactly this reason: that budget only bounds the sliding-window *history*, not the system prompt (facts/calendar bullets) or the room the model needs to actually finish talking. If the final chunk's `done_reason` is `"length"`, `ollama_chat` raises `ResponseTruncatedError(text)` (carrying the partial text via `.text`) instead of returning it — see `handle_turn` below for how this is recovered from |
-| `ResponseTruncatedError` | Exception raised by `ollama_chat` when `done_reason == "length"`. `extract_facts`/`classify_calendar_intent` need no special handling — both already catch broad `Exception` around their `ollama_chat` calls and fall back safely |
+| `ollama_chat(messages, think, stream_to_stdout)` | Calls `/api/chat` with `stream: true` and `options: {"num_ctx": OLLAMA_NUM_CTX}`, parses the NDJSON response line-by-line, concatenates content chunks, and stops as soon as a chunk's `done` flag is set (verified to ignore any further lines after `done`). The explicit `num_ctx` matters: without it Ollama loads the model at its own default context window (observed: 4096 for `gemma4:12b`, independent of the model's much larger supported `context_length`), and once a thread's history plus system prompt approaches that ceiling, `num_ctx` caps prompt+completion *combined* — leaving too few tokens for the response and forcing Ollama to cut it off mid-sentence (`done_reason: "length"`) instead of stopping naturally. `OLLAMA_NUM_CTX` is set well above `CONTEXT_TOKEN_BUDGET` for exactly this reason: that budget only bounds the sliding-window *history*, not the system prompt (facts bullets) or the room the model needs to actually finish talking. If the final chunk's `done_reason` is `"length"`, `ollama_chat` raises `ResponseTruncatedError(text)` (carrying the partial text via `.text`) instead of returning it — see `handle_turn` below for how this is recovered from |
+| `ResponseTruncatedError` | Exception raised by `ollama_chat` when `done_reason == "length"`. `extract_facts` needs no special handling — it already catches broad `Exception` around its `ollama_chat` calls and falls back safely |
 | `think_param(level)` | Maps a CLI string (`"off"`, `"on"`/`"true"`, or a level name) to the value Ollama's `think` API field expects |
 
 ### Background fact extraction
@@ -207,7 +205,7 @@ This is what happens for every message you send, traced through `handle_turn`:
    as the original design called for ("SQLite errors during retrieval are
    caught; that turn proceeds with no relevant facts").
 3. **Build the prompt.** The system prompt (base instructions + any
-   retrieved facts + calendar events) is combined with a sliding window of
+   retrieved facts) is combined with a sliding window of
    the most recent thread messages, trimmed by `truncate_messages_to_budget`
    to fit a budget computed by `effective_history_budget` — normally the
    full 8192-token `CONTEXT_TOKEN_BUDGET`, but shrunk on any turn where this
@@ -293,10 +291,6 @@ change any of these:
 | `DEDUP_SIMILARITY_THRESHOLD` | `0.92` | Minimum cosine similarity for a new fact to be treated as a duplicate |
 | `DEFAULT_THINK` | `"off"` | Default reasoning-effort level for new sessions |
 | `EXTRACTION_JOIN_TIMEOUT_SECONDS` | `5` | How long `run_chat_loop` waits on exit for the last extraction thread to finish |
-| `CALENDAR_ENABLED` | `True` | Master on/off switch for all calendar behavior (see §16) |
-| `CALENDAR_LOOKAHEAD_DAYS` | `7` | How many days ahead `fetch_upcoming_events` looks |
-| `CALENDAR_CACHE_TTL_SECONDS` | `300` | How long a fetched event list is reused before `refresh_calendar_cache` fetches again |
-| `APPLESCRIPT_TIMEOUT_SECONDS` | `120` | Timeout (seconds) for any single `osascript` subprocess call. Sized for `fetch_upcoming_events`'s `whose`-filtered scan against real-world calendar volumes (60–90+s observed against ~1,700 events across 14 calendars); `create_event` finishes in well under a second but shares the same constant |
 
 ## 9. CLI Reference
 
@@ -307,7 +301,6 @@ ochat --think <level>          # off | on/true | low | medium | high | ... (pass
 ochat threads                  # list all threads with message counts and last-updated time
 ochat memory list               # list every stored long-term fact
 ochat memory forget <id>        # delete one fact by id
-ochat calendar list             # list upcoming events from macOS Calendar.app (macOS only, see §16)
 ```
 
 ## 10. Error Handling & Resilience
@@ -327,36 +320,23 @@ ochat calendar list             # list upcoming events from macOS Calendar.app (
 
 ## 11. Concurrency Model
 
-There are two independent kinds of background thread in `ochat`, neither of
-which ever blocks the main chat turn or each other:
-
-1. A daemon `threading.Thread` per turn, running `extract_facts`. The
-   SQLite connection (`init_db(..., check_same_thread=False)`) is shared
-   between the main thread and whichever extraction thread is currently
-   running; WAL mode keeps reads and writes from blocking each other.
-   `run_chat_loop` only ever has at most one extraction thread alive at a
-   time — a new turn first does a non-blocking `join(timeout=0)` to reap
-   the previous one before starting the next, and the program's `finally`
-   block gives the very last one up to 5 seconds to finish before exiting.
-2. A daemon `threading.Thread` spawned by `refresh_calendar_cache`
-   (`_run_calendar_refresh`), at most one alive at a time, guarded by a
-   `calendar_cache["refreshing"]` flag rather than a join — `refresh_calendar_cache`
-   itself never blocks, so there's no natural "after the call" point to reap
-   from the way `run_chat_loop` reaps the extraction thread. This thread is
-   fire-and-forget: nothing waits for it on exit (the cache is rebuilt fresh
-   next session anyway), and its handle is stashed at
-   `calendar_cache["_thread"]` purely so tests can join it deterministically.
-   See §16 for why this fetch needs to be backgrounded at all (it can
-   legitimately take 60–90+ seconds against a real-world calendar set).
+`ochat` runs at most one background thread at a time, and it never blocks
+the main chat turn: a daemon `threading.Thread` per turn, running
+`extract_facts`. The SQLite connection (`init_db(..., check_same_thread=False)`)
+is shared between the main thread and whichever extraction thread is
+currently running; WAL mode keeps reads and writes from blocking each other.
+`run_chat_loop` only ever has at most one extraction thread alive at a
+time — a new turn first does a non-blocking `join(timeout=0)` to reap
+the previous one before starting the next, and the program's `finally`
+block gives the very last one up to 5 seconds to finish before exiting.
 
 There is no thread pool, no shared mutable state beyond the SQLite
-connection and the `calendar_cache` dict, and no locking required beyond
-what SQLite's WAL mode already provides and what Python's GIL already
-guarantees for simple dict reads/writes.
+connection, and no locking required beyond what SQLite's WAL mode already
+provides.
 
 ## 12. Testing
 
-95 tests: `tests/test_memory.py` (40) + `tests/test_calendar.py` (55), run via:
+44 tests: `tests/test_memory.py`, run via:
 
 ```bash
 uv run --with pytest --with numpy --with requests pytest tests/ -v
@@ -411,9 +391,7 @@ considered complete. Source documents:
 ```
 ochat/
   ochat.py                              # the core application
-  ochat_calendar.py                     # macOS Calendar.app I/O layer
-  tests/test_memory.py                  # 40 tests
-  tests/test_calendar.py                # 55 tests
+  tests/test_memory.py                  # 44 tests
   scripts/git-hooks/                    # post-commit/post-merge: keep the deployed clone in sync
   .gitignore
   CLAUDE.md                             # guidance for Claude Code working in this repo
@@ -423,120 +401,25 @@ ochat/
   docs/superpowers/plans/...            # implementation plan
 ```
 
-## 16. Clock & Calendar Awareness
+## 16. Clock Awareness
 
-Added on top of the original design: `ochat` now tells the model the
-current local date/time on every relevant call, and can optionally surface
-and create events in macOS Calendar.app. The whole feature is additive — it
-never slows down or changes behavior for a message that has nothing to do
-with dates or calendars, and it degrades to a no-op anywhere Calendar.app
-isn't available or accessible.
-
-### Date/time awareness
+Added on top of the original design: `ochat` tells the model the current
+local date/time on every relevant call, so it can resolve relative
+references ("next Thursday", "in three weeks") into absolute ones instead
+of guessing. This is purely additive — it never slows down or changes
+behavior for a message that has nothing to do with dates, and it has no
+platform dependency.
 
 | Function | Signature | Purpose |
 |---|---|---|
-| `current_datetime_context()` | `() -> str` | Returns `"Current date/time: <weekday>, <Month> <day>, <year>, <HH:MM AM/PM> <tz abbrev>"` using `datetime.now().astimezone()` — local time, not UTC. Pure function: no I/O beyond reading the system clock, no macOS dependency, so it keeps working on any platform and regardless of Calendar permission state |
+| `current_datetime_context()` | `() -> str` | Returns `"Current date/time: <weekday>, <Month> <day>, <year>, <HH:MM AM/PM> <tz abbrev>"` using `datetime.now().astimezone()` — local time, not UTC. Pure function: no I/O beyond reading the system clock |
 
-Its output is injected in three places:
+Its output is injected in two places:
 
 | # | Where | Effect |
 |---|---|---|
 | 1 | `build_system_prompt()` | Prepended to the base instruction on **every** chat turn, so the model always has a "now" anchor when answering |
 | 2 | `EXTRACTION_PROMPT` (used by `extract_facts`) | Appended to the system prompt for the background fact-extraction call; the prompt text itself also instructs the model to resolve relative dates (e.g. "next Thursday") to absolute ones before recording a fact, so stored facts don't go stale once the original conversation scrolls out of context |
-| 3 | `CALENDAR_INTENT_PROMPT` (used by `classify_calendar_intent`) | Passed as `now_context` so the calendar-intent classifier can resolve phrases like "tomorrow at 2pm" to an absolute ISO 8601 datetime |
 
 Storage is unaffected: `created_at` and message `ts` fields remain UTC
 everywhere, as before — only what's *told to the model* is local time.
-
-### `ochat_calendar.py` — the macOS I/O layer
-
-A new, separate file: a pure AppleScript (`osascript`) I/O layer with no
-model calls, no prompts, and no CLI of its own — `ochat.py`'s orchestration
-code decides when and why to call it, the same way it already calls
-`insert_fact` or `ollama_embed`.
-
-| Function / class | Signature | Purpose |
-|---|---|---|
-| `is_macos()` | `() -> bool` | `platform.system() == "Darwin"` — the single gate every calendar code path checks before doing anything |
-| `CalendarError` | `Exception` subclass | Raised for any `osascript` failure: non-zero exit, timeout, or missing `osascript` binary |
-| `fetch_upcoming_events(days_ahead, timeout)` | `(int, float) -> list[dict]` | Runs one AppleScript that filters every calendar's events by a `whose`-clause date range (`current date` to `current date + days_ahead`). Returns `[{"title", "start" (ISO str), "end" (ISO str), "calendar"}, ...]`. Raises `CalendarError` on failure. **Performance note:** the `whose` clause is *not* a fast native query — Calendar.app's AppleScript bridge evaluates it with one Apple Event round trip per event scanned (~30–60ms each), regardless of whether the event matches. Cost scales with each calendar's total event count, not with match selectivity; an unfiltered bulk-property fetch (`summary`/`start date` of every event, no `whose`) was measured to be no faster — confirmed empirically against a ~1,700-event/14-calendar account, where the full scan took ~80s. There is no AppleScript-level fix for this; see §11 and §16 for how the caller works around it (background refresh + a generous timeout) rather than the script itself |
-| `create_event(title, start, end, notes, timeout)` | `(str, datetime, datetime, str \| None, float) -> None` | Builds an AppleScript that starts from `current date` and overwrites its year/month/day/hour/minute fields individually (avoids AppleScript's locale-dependent date-string parsing), escapes `title`/`notes` for safe interpolation, and creates the event in `calendar 1`. Raises `CalendarError` on failure |
-| `_run_applescript(script, timeout)` | private | Shells out via `subprocess.run(["osascript", "-e", script], ...)`; wraps `TimeoutExpired`/`FileNotFoundError` and any non-zero exit code into `CalendarError` |
-| `_build_fetch_script(days_ahead)` / `_parse_events(raw)` | private | Construct the read AppleScript and parse its output. Fields are delimited with control characters unlikely to appear in real text — `chr(31)` (ASCII unit separator) between fields, `chr(30)` (record separator) between events — written into the script's own output construction rather than relying on AppleScript's native list/record serialization, which is far more fragile to parse from Python |
-| `_escape_applescript_string(value)` / `_format_applescript_date_setup(var_name, when)` | private | Escape `"`/`\` before interpolating a string into generated AppleScript source; emit the `set year of ... / set month of ... / ...` statements used to build a date field-by-field |
-
-### Read path: ambient calendar context with a TTL cache, refreshed in the background
-
-`run_chat_loop` creates one cache dict per process —
-`{"events": [...], "fetched_at": datetime | None}` — and threads it into
-`handle_turn` as a 6th, optional `calendar_cache` parameter, the same way
-`conn`/`thread`/`path` are already threaded through.
-
-Each turn, if `calendar_cache` was supplied, `CALENDAR_ENABLED` is `True`,
-and `ochat_calendar.is_macos()`, `handle_turn` calls
-`refresh_calendar_cache(calendar_cache)`:
-
-| Function | Purpose |
-|---|---|
-| `refresh_calendar_cache(calendar_cache)` | **Never blocks.** Always returns `calendar_cache`'s current `events` list immediately. If `fetched_at` is set and younger than `CALENDAR_CACHE_TTL_SECONDS` (300s), that's just the existing cache — no `osascript` call, same as before. Otherwise, if no refresh is already running (`calendar_cache.get("refreshing")` is falsy), it sets `calendar_cache["refreshing"] = True` and spawns a daemon thread (`_run_calendar_refresh`, handle stashed at `calendar_cache["_thread"]`) that calls `ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)` in the background, updates `events`/`fetched_at` on success (or prints a `CalendarError` warning to stderr and leaves the last-known events in place on failure), and always resets `refreshing` to `False` in a `finally`. The refreshed events become visible starting the *next* turn that calls `refresh_calendar_cache`, not the current one |
-
-This exists because `fetch_upcoming_events` can legitimately take 60–90+
-seconds against a real calendar (see the performance note on
-`fetch_upcoming_events` in §16's function table) — far too long to block an
-interactive chat turn on. Before this, `refresh_calendar_cache` called
-`fetch_upcoming_events` synchronously, so every `CALENDAR_CACHE_TTL_SECONDS`
-window, the *next* user message would silently hang for however long the
-AppleScript scan took. Backgrounding it means the first-ever turn in a
-session has no calendar context (the cache starts empty and the refresh
-hasn't completed yet), but no turn — first or otherwise — ever blocks on it.
-`ochat calendar list` (`cmd_calendar_list`) is unaffected by any of this: it
-bypasses the cache and calls `fetch_upcoming_events` directly, since as a
-deliberate one-off command it's expected to wait for the real answer.
-
-When non-empty, the cached events are rendered as a new optional
-`"Upcoming calendar events:"` bullet section in `build_system_prompt()`
-(now `build_system_prompt(relevant_facts, calendar_events=None)`), alongside
-the existing "Relevant memory" bullets — so the model can answer questions
-like "what do I have on Thursday" using only ambient context, with no extra
-model call.
-
-### Write path: keyword gate → intent classification → confirmation
-
-Creating an event is the one calendar behavior that costs extra latency, so
-it's deliberately gated to only run for messages that plausibly need it:
-
-| Step | Function | Purpose |
-|---|---|---|
-| 1. Cheap local gate | `looks_calendar_related(text)` | Lowercases the message and checks it against `CALENDAR_KEYWORDS` (`"calendar"`, `"schedule"`, `"scheduled"`, `"meeting"`, `"appointment"`, `"event"`, `"remind"`, `"reminder"`, the seven weekday names, `"tomorrow"`, `"tonight"`). Pure string logic, no I/O — this is what keeps ordinary chat turns exactly as fast as before the feature existed |
-| 2. Intent classification | `classify_calendar_intent(user_input, now_context)` | Only called when step 1 matches. Sends `CALENDAR_INTENT_PROMPT` + `now_context` to `ollama_chat` (`think=False`, `stream_to_stdout=False`), parses the reply via `_extract_json_object()`, and returns `{"intent": "none"\|"query"\|"create", "title", "start", "end", "notes"}`. Any call/parse failure, or an `intent` value outside the three allowed strings, falls back to `{"intent": "none", ...}` — fails safe to "just a normal message" |
-| 3. Orchestration | `handle_calendar_create_intent(user_input, now_context, calendar_cache)` | Calls step 2; if `intent != "create"` or `title`/`start`/`end` is missing, returns immediately (no-op). Otherwise parses `start`/`end` via `datetime.fromisoformat()` (returns on `ValueError`) and prints a confirmation prompt showing the **resolved absolute** date/time, e.g. `Add to calendar? "Dentist appointment" -- Thu, Jun 25 2026, 02:00 PM-02:30 PM [y/N]`, then blocks on `input()`. Only `"y"`/`"yes"` (case-insensitive, after `.strip().lower()`) proceeds to call `ochat_calendar.create_event(...)`; anything else prints `"cancelled, nothing was added"` and returns. A `CalendarError` from `create_event` prints `error: failed to add event (...)` to stderr and returns — a failed or declined write never aborts the chat reply for that turn. On success, the new event is appended directly to `calendar_cache["events"]` so it's visible as context to the very same turn's chat reply (e.g. "add a meeting Thursday and tell me what else I have that day") |
-
-This whole sequence runs inside `handle_turn`, **before** the main chat
-call, in the same position long-term fact retrieval already occupies. An
-`intent == "query"` result is intentionally a no-op beyond this point —
-cached upcoming events (already ambient context every turn via the read
-path above) are all that's used to answer calendar questions; there is no
-separate query-triggered fetch.
-
-### `ochat calendar list` — standalone CLI command
-
-| Function | Purpose |
-|---|---|
-| `cmd_calendar_list()` | Bypasses the chat loop and the cache entirely. Exits with status 1 and a stderr message if not on macOS. Otherwise calls `ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)` directly and prints one line per event (`<start> - <end>  <title>  (<calendar>)`), or `"no upcoming events"`. Exits with status 1 and a stderr message on `CalendarError`. Doubles as a standalone way to confirm macOS Calendar/Automation permissions are actually granted, independent of chatting |
-
-Wired into `main()` as a third subparser alongside `threads` and `memory`:
-`ochat calendar list`.
-
-### macOS-only graceful degradation
-
-| Condition | Behavior |
-|---|---|
-| Not running on macOS (`ochat_calendar.is_macos()` is `False`) | All calendar behavior — read-path cache refresh, the keyword gate's downstream classification, `cmd_calendar_list` — silently no-ops or exits cleanly. `current_datetime_context()` keeps working everywhere, so date/time awareness in chat and fact extraction is unaffected |
-| `osascript` missing, times out, or Calendar/Automation permission not yet granted | Both `fetch_upcoming_events` and `create_event` raise `CalendarError`. Reads degrade to the last-known cached events (or empty) plus a stderr warning; writes print a clear error and the turn continues normally. The one-time macOS permission dialog itself cannot be triggered or bypassed programmatically — the user has to approve it themselves (see `quickuse.md`) |
-| Calendar-intent model call fails or returns unparseable JSON | `classify_calendar_intent` falls back to `{"intent": "none", ...}` — treated as an ordinary, non-calendar message |
-| User declines the create-event confirmation | No write occurs; `"cancelled, nothing was added"` is printed; the turn continues exactly as if the message had been a normal chat message |
-
-Design rationale and the original task-by-task implementation plan for this
-feature are in `docs/superpowers/specs/2026-06-20-clock-calendar-design.md`
-and `docs/superpowers/plans/2026-06-20-clock-calendar-implementation.md`.

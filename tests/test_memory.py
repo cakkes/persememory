@@ -103,6 +103,18 @@ def test_effective_history_budget_never_negative():
     assert result == 0
 
 
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+
+def test_current_datetime_context_formats_local_time():
+    fixed = datetime(2026, 6, 20, 18, 51, tzinfo=timezone(timedelta(hours=-7)))
+    with patch("ochat.datetime") as mock_datetime:
+        mock_datetime.now.return_value.astimezone.return_value = fixed
+        result = ochat.current_datetime_context()
+    assert result == "Current date/time: Saturday, June 20, 2026, 06:51 PM UTC-07:00"
+
+
 import json
 
 
@@ -255,6 +267,11 @@ def test_ollama_chat_raises_response_truncated_error_when_done_reason_is_length(
     assert exc_info.value.text == "Hello"
 
 
+def test_extract_json_array_unchanged_behavior():
+    text = '```json\n["fact one"]\n```'
+    assert ochat._extract_json_array(text) == '["fact one"]'
+
+
 def test_extract_facts_inserts_new_non_duplicate_facts(tmp_path):
     conn = ochat.init_db(tmp_path / "memory.db")
     with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
@@ -325,6 +342,16 @@ def test_extract_facts_dedupes_within_same_call(tmp_path):
     assert facts[0]["text"] == "likes terse answers"
 
 
+def test_extract_facts_includes_current_datetime_in_system_prompt(tmp_path):
+    conn = ochat.init_db(tmp_path / "memory.db")
+    with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
+         patch("ochat.ollama_chat", return_value="[]") as mock_chat, \
+         patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)):
+        ochat.extract_facts(conn, "let's meet next Thursday", "sounds good", "default")
+    system_message = mock_chat.call_args.args[0][0]["content"]
+    assert "Current date/time:" in system_message
+
+
 def test_build_system_prompt_with_no_facts():
     prompt = ochat.build_system_prompt([])
     assert "Relevant memory" not in prompt
@@ -337,6 +364,11 @@ def test_build_system_prompt_includes_fact_bullets():
     prompt = ochat.build_system_prompt(facts)
     assert "Relevant memory" in prompt
     assert "- likes terse answers" in prompt
+
+
+def test_build_system_prompt_includes_current_datetime_context():
+    prompt = ochat.build_system_prompt([])
+    assert "Current date/time:" in prompt
 
 
 def test_handle_turn_returns_none_and_does_not_save_on_request_failure(tmp_path):
@@ -385,7 +417,15 @@ def test_handle_turn_saves_thread_and_starts_extraction_on_success(tmp_path):
 
 def test_handle_turn_retries_once_with_smaller_window_after_truncated_reply(tmp_path, capsys):
     conn = ochat.init_db(tmp_path / "memory.db")
-    thread = {"name": "t", "messages": []}
+    # History large enough that budget//2 drops it, so retry has a genuinely smaller window.
+    long_history = "y" * (ochat.CONTEXT_TOKEN_BUDGET // 2 * ochat.CHARS_PER_TOKEN + 4)
+    thread = {
+        "name": "t",
+        "messages": [
+            {"role": "user", "content": long_history, "ts": "t1"},
+            {"role": "assistant", "content": "ok", "ts": "t2"},
+        ],
+    }
     path = tmp_path / "t.json"
     with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
          patch("ochat.ollama_chat", side_effect=[ochat.ResponseTruncatedError("partial"), "full reply"]) as mock_chat, \
@@ -394,7 +434,7 @@ def test_handle_turn_retries_once_with_smaller_window_after_truncated_reply(tmp_
     assert result is not None
     result.join(timeout=2)
     assert mock_chat.call_count == 2
-    assert thread["messages"][1]["content"] == "full reply"
+    assert thread["messages"][-1]["content"] == "full reply"
     assert path.exists()
     assert "cut off" in capsys.readouterr().err
     mock_extract.assert_called_once()
@@ -402,7 +442,14 @@ def test_handle_turn_retries_once_with_smaller_window_after_truncated_reply(tmp_
 
 def test_handle_turn_saves_partial_reply_when_retry_also_truncated(tmp_path, capsys):
     conn = ochat.init_db(tmp_path / "memory.db")
-    thread = {"name": "t", "messages": []}
+    long_history = "y" * (ochat.CONTEXT_TOKEN_BUDGET // 2 * ochat.CHARS_PER_TOKEN + 4)
+    thread = {
+        "name": "t",
+        "messages": [
+            {"role": "user", "content": long_history, "ts": "t1"},
+            {"role": "assistant", "content": "ok", "ts": "t2"},
+        ],
+    }
     path = tmp_path / "t.json"
     with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
          patch("ochat.ollama_chat", side_effect=[
@@ -414,7 +461,83 @@ def test_handle_turn_saves_partial_reply_when_retry_also_truncated(tmp_path, cap
     assert result is not None
     result.join(timeout=2)
     assert mock_chat.call_count == 2
-    assert thread["messages"][1]["content"] == "second partial"
+    assert thread["messages"][-1]["content"] == "second partial"
     assert path.exists()
     assert capsys.readouterr().err.count("cut off") == 2
     mock_extract.assert_called_once()
+
+
+# ── New tests covering the 10 review findings ─────────────────────────────────
+
+
+def test_extract_json_array_handles_prose_with_brackets_before_fenced_json():
+    # Bug 1: text.find('[') landed on prose bracket instead of JSON array bracket
+    text = 'Here are [3] facts:\n```json\n["user prefers vim"]\n```'
+    result = ochat._extract_json_array(text)
+    assert json.loads(result) == ["user prefers vim"]
+
+
+def test_extract_facts_recovers_partial_facts_from_truncated_extraction_response(tmp_path):
+    # Bug 2: ResponseTruncatedError.text was discarded by the broad except
+    conn = ochat.init_db(tmp_path / "memory.db")
+    with patch("ochat.EXTRACTION_LOG_PATH", tmp_path / "extraction.log"), \
+         patch("ochat.ollama_chat", side_effect=ochat.ResponseTruncatedError('["partial fact"]')), \
+         patch("ochat.ollama_embed", return_value=np.array([1.0, 0.0], dtype=np.float32)):
+        ochat.extract_facts(conn, "tell me something", "partial reply", "default")
+    facts = ochat.get_all_facts(conn)
+    assert len(facts) == 1
+    assert facts[0]["text"] == "partial fact"
+
+
+def test_handle_turn_embed_failure_error_message_says_embed_not_chat(tmp_path, capsys):
+    # Bug 4: error said "chat request failed" when the embed call was the one that failed
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", side_effect=ochat.requests.RequestException("timeout")):
+        ochat.handle_turn(conn, thread, path, "hello", "off")
+    err = capsys.readouterr().err
+    assert "embed" in err.lower()
+    assert "chat" not in err.lower()
+
+
+def test_handle_turn_skips_retry_when_halved_budget_yields_same_window(tmp_path, capsys):
+    # Bug 5: with no history, budget//2 produces identical window — retry was a no-op
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
+         patch("ochat.ollama_chat", side_effect=ochat.ResponseTruncatedError("partial reply")) as mock_chat, \
+         patch("ochat.extract_facts"):
+        result = ochat.handle_turn(conn, thread, path, "hello", "off")
+    assert result is not None
+    result.join(timeout=2)
+    assert mock_chat.call_count == 1
+    assert thread["messages"][-1]["content"] == "partial reply"
+    assert "minimum" in capsys.readouterr().err
+
+
+def test_insert_fact_does_not_auto_commit_to_db(tmp_path):
+    # Opt 6: insert_fact must not commit so extract_facts can batch all inserts into one transaction
+    conn = ochat.init_db(tmp_path / "memory.db")
+    ochat.insert_fact(conn, "pending fact", np.array([1.0], dtype=np.float32), "default")
+    conn.rollback()
+    rows = conn.execute("SELECT id FROM facts").fetchall()
+    assert len(rows) == 0
+
+
+def test_get_all_facts_returns_inserted_fact_from_cache_before_commit(tmp_path):
+    # Opt 6: cache must expose the fact immediately after insert even before a DB commit
+    conn = ochat.init_db(tmp_path / "memory.db")
+    ochat.insert_fact(conn, "uncommitted fact", np.array([1.0], dtype=np.float32), "default")
+    facts = ochat.get_all_facts(conn)
+    assert any(f["text"] == "uncommitted fact" for f in facts)
+
+
+def test_save_thread_writes_compact_json_without_indentation(tmp_path):
+    # Opt 9: indent=2 bloats files by ~40%; machine-read-only files need no pretty-printing
+    path = tmp_path / "test.json"
+    thread = {"name": "test", "messages": [{"role": "user", "content": "hi"}]}
+    ochat.save_thread(path, thread)
+    raw = path.read_text()
+    assert "  " not in raw

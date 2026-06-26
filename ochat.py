@@ -8,16 +8,16 @@
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
 import requests
-
-import ochat_calendar
 
 OLLAMA_URL = "http://127.0.0.1:11434"
 CHAT_MODEL = "gemma4:12b"
@@ -37,10 +37,16 @@ RETRIEVAL_MIN_SIMILARITY = 0.45
 DEDUP_SIMILARITY_THRESHOLD = 0.92
 DEFAULT_THINK = "off"
 EXTRACTION_JOIN_TIMEOUT_SECONDS = 5
-CALENDAR_ENABLED = True
-CALENDAR_LOOKAHEAD_DAYS = 7
-CALENDAR_CACHE_TTL_SECONDS = 300
-APPLESCRIPT_TIMEOUT_SECONDS = 120
+
+# ── In-memory fact cache ──────────────────────────────────────────────────────
+# Avoids re-scanning the full fact table from SQLite on every turn. Populated
+# by init_db, kept current by insert_fact / delete_fact.
+_fact_cache: list[dict] | None = None
+_fact_cache_lock = threading.Lock()
+# Serialises SQLite writes across the main thread and any extraction threads.
+_db_lock = threading.Lock()
+
+# ── Pure logic ────────────────────────────────────────────────────────────────
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -51,20 +57,40 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 def top_k_facts(query_embedding, facts, k=RETRIEVAL_TOP_K, min_similarity=RETRIEVAL_MIN_SIMILARITY):
-    scored = []
-    for fact in facts:
-        similarity = cosine_similarity(query_embedding, fact["embedding"])
-        if similarity >= min_similarity:
-            scored.append((similarity, fact))
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [fact for _, fact in scored[:k]]
+    if not facts:
+        return []
+    matrix = np.stack([f["embedding"] for f in facts])       # (N, D)
+    q_norm = float(np.linalg.norm(query_embedding))
+    if q_norm == 0.0:
+        return []
+    q = query_embedding / q_norm
+    row_norms = np.linalg.norm(matrix, axis=1)               # (N,)
+    valid = row_norms > 0
+    similarities = np.zeros(len(facts), dtype=np.float32)
+    if np.any(valid):
+        similarities[valid] = (matrix[valid] @ q) / row_norms[valid]
+    mask = similarities >= min_similarity
+    if not np.any(mask):
+        return []
+    indices = np.where(mask)[0]
+    top_indices = indices[np.argsort(similarities[indices])[::-1][:k]]
+    return [facts[int(i)] for i in top_indices]
 
 
 def is_duplicate_fact(candidate_embedding, existing_embeddings, threshold=DEDUP_SIMILARITY_THRESHOLD):
-    for embedding in existing_embeddings:
-        if cosine_similarity(candidate_embedding, embedding) > threshold:
-            return True
-    return False
+    if not existing_embeddings:
+        return False
+    matrix = np.stack(existing_embeddings)                   # (N, D)
+    c_norm = float(np.linalg.norm(candidate_embedding))
+    if c_norm == 0.0:
+        return False
+    q = candidate_embedding / c_norm
+    row_norms = np.linalg.norm(matrix, axis=1)
+    valid = row_norms > 0
+    similarities = np.zeros(len(existing_embeddings), dtype=np.float32)
+    if np.any(valid):
+        similarities[valid] = (matrix[valid] @ q) / row_norms[valid]
+    return bool(np.any(similarities > threshold))
 
 
 def estimate_tokens(text: str) -> int:
@@ -96,16 +122,7 @@ def current_datetime_context() -> str:
     return f"Current date/time: {now.strftime('%A, %B %d, %Y, %I:%M %p %Z')}"
 
 
-CALENDAR_KEYWORDS = (
-    "calendar", "schedule", "scheduled", "meeting", "appointment", "event",
-    "remind", "reminder", "monday", "tuesday", "wednesday", "thursday",
-    "friday", "saturday", "sunday", "tomorrow", "tonight",
-)
-
-
-def looks_calendar_related(text: str) -> bool:
-    lowered = text.lower()
-    return any(keyword in lowered for keyword in CALENDAR_KEYWORDS)
+# ── Storage ───────────────────────────────────────────────────────────────────
 
 
 def thread_path(name: str) -> Path:
@@ -137,11 +154,12 @@ def save_thread(path: Path, thread: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(".tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(thread, f, indent=2)
+        json.dump(thread, f, separators=(',', ':'))
     os.replace(tmp_path, path)
 
 
 def init_db(db_path: Path) -> sqlite3.Connection:
+    global _fact_cache
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -157,27 +175,61 @@ def init_db(db_path: Path) -> sqlite3.Connection:
         """
     )
     conn.commit()
+    rows = conn.execute(
+        "SELECT id, text, embedding, source_thread, created_at FROM facts"
+    ).fetchall()
+    with _fact_cache_lock:
+        _fact_cache = [
+            {
+                "id": row[0],
+                "text": row[1],
+                "embedding": np.frombuffer(row[2], dtype=np.float32),
+                "source_thread": row[3],
+                "created_at": row[4],
+            }
+            for row in rows
+        ]
     return conn
 
 
 def insert_fact(conn, text, embedding, source_thread):
-    conn.execute(
-        "INSERT INTO facts (text, embedding, source_thread, created_at) VALUES (?, ?, ?, ?)",
-        (
-            text,
-            np.asarray(embedding, dtype=np.float32).tobytes(),
-            source_thread,
-            datetime.now(timezone.utc).isoformat(),
-        ),
-    )
-    conn.commit()
+    """Insert a fact row and update the in-memory cache. Does NOT commit — the
+    caller is responsible for calling conn.commit() to flush the transaction."""
+    embedding_arr = np.asarray(embedding, dtype=np.float32)
+    created_at = datetime.now(timezone.utc).isoformat()
+    with _db_lock:
+        cursor = conn.execute(
+            "INSERT INTO facts (text, embedding, source_thread, created_at) VALUES (?, ?, ?, ?)",
+            (
+                text,
+                embedding_arr.tobytes(),
+                source_thread,
+                created_at,
+            ),
+        )
+    new_fact = {
+        "id": cursor.lastrowid,
+        "text": text,
+        "embedding": embedding_arr,
+        "source_thread": source_thread,
+        "created_at": created_at,
+    }
+    with _fact_cache_lock:
+        if _fact_cache is not None:
+            _fact_cache.append(new_fact)
 
 
 def get_all_facts(conn):
+    """Return facts from the in-memory cache, falling back to the DB if the
+    cache has not been populated yet (e.g. in cmd_memory_* code paths)."""
+    global _fact_cache
+    with _fact_cache_lock:
+        if _fact_cache is not None:
+            return list(_fact_cache)
     rows = conn.execute(
         "SELECT id, text, embedding, source_thread, created_at FROM facts"
     ).fetchall()
-    return [
+    facts = [
         {
             "id": row[0],
             "text": row[1],
@@ -187,12 +239,23 @@ def get_all_facts(conn):
         }
         for row in rows
     ]
+    with _fact_cache_lock:
+        _fact_cache = facts
+    return list(facts)
 
 
 def delete_fact(conn, fact_id):
-    cursor = conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
-    conn.commit()
+    with _db_lock:
+        cursor = conn.execute("DELETE FROM facts WHERE id = ?", (fact_id,))
+        conn.commit()
+    if cursor.rowcount > 0:
+        with _fact_cache_lock:
+            if _fact_cache is not None:
+                _fact_cache[:] = [f for f in _fact_cache if f["id"] != fact_id]
     return cursor.rowcount > 0
+
+
+# ── Ollama client ─────────────────────────────────────────────────────────────
 
 
 def think_param(level: str):
@@ -300,6 +363,8 @@ def ollama_chat(messages, think=False, stream_to_stdout=True):
     return text
 
 
+# ── Orchestration ─────────────────────────────────────────────────────────────
+
 EXTRACTION_PROMPT = (
     "Given this exchange, list any new durable facts or preferences about the "
     "user worth remembering long-term. Respond with ONLY a JSON array of short "
@@ -320,16 +385,16 @@ def _extract_json_substring(text: str, open_char: str, close_char: str) -> str:
     """Pull a clean JSON substring out of model output.
 
     Models sometimes wrap their JSON reply in markdown code fences or
-    surround it with prose. Strip fences if present, then fall back to
-    slicing between the first opening char and the last closing char so
-    json.loads has a fighting chance.
+    surround it with prose. If a fence is present anywhere in the text,
+    extract just its contents first — this avoids brackets in prose before
+    the fence (e.g. "Here are [3] facts:\n```json\n[...]\n```") misdirecting
+    the fallback bracket search. Then slice between the first opening char
+    and the last closing char so json.loads has a fighting chance.
     """
     text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
+    fence_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+    if fence_match:
+        text = fence_match.group(1).strip()
     start = text.find(open_char)
     end = text.rfind(close_char)
     if start != -1 and end != -1 and end > start:
@@ -341,80 +406,57 @@ def _extract_json_array(text: str) -> str:
     return _extract_json_substring(text, "[", "]")
 
 
-def _extract_json_object(text: str) -> str:
-    return _extract_json_substring(text, "{", "}")
-
-
-CALENDAR_INTENT_PROMPT = (
-    "You help detect calendar-related requests. Given the current date/time "
-    "context and a user message, respond with ONLY a JSON object describing "
-    "the user's calendar intent: "
-    '{"intent": "none"|"query"|"create", "title": string or null, '
-    '"start": string or null, "end": string or null, "notes": string or null}. '
-    'Use intent "create" only if the user is clearly asking to add a new '
-    "event/appointment/meeting to their calendar. Use intent \"query\" if "
-    "they're asking what's on their calendar or about existing events. "
-    "Otherwise use \"none\". When intent is \"create\", resolve any relative "
-    'dates/times (e.g. "next Thursday", "tomorrow at 2pm") to absolute ISO '
-    '8601 datetimes (YYYY-MM-DDTHH:MM:SS) for "start" and "end" using the '
-    "current date/time context given. If no explicit end time is mentioned, "
-    "assume the event is 1 hour long."
-)
-
-
-def classify_calendar_intent(user_input: str, now_context: str) -> dict:
-    fallback = {"intent": "none", "title": None, "start": None, "end": None, "notes": None}
-    try:
-        reply = ollama_chat(
-            [
-                {"role": "system", "content": f"{CALENDAR_INTENT_PROMPT}\n\n{now_context}"},
-                {"role": "user", "content": user_input},
-            ],
-            think=False,
-            stream_to_stdout=False,
-        )
-        parsed = json.loads(_extract_json_object(reply))
-        if not isinstance(parsed, dict) or parsed.get("intent") not in ("none", "query", "create"):
-            return fallback
-        return {
-            "intent": parsed.get("intent"),
-            "title": parsed.get("title"),
-            "start": parsed.get("start"),
-            "end": parsed.get("end"),
-            "notes": parsed.get("notes"),
-        }
-    except Exception:
-        return fallback
-
-
 def extract_facts(conn, user_message: str, assistant_message: str, source_thread: str) -> None:
     try:
         exchange = f"User: {user_message}\nAssistant: {assistant_message}"
-        reply = ollama_chat(
-            [
-                {"role": "system", "content": f"{EXTRACTION_PROMPT}\n\n{current_datetime_context()}"},
-                {"role": "user", "content": exchange},
-            ],
-            think=False,
-            stream_to_stdout=False,
-        )
-        candidate_facts = json.loads(_extract_json_array(reply))
+        try:
+            reply = ollama_chat(
+                [
+                    {"role": "system", "content": f"{EXTRACTION_PROMPT}\n\n{current_datetime_context()}"},
+                    {"role": "user", "content": exchange},
+                ],
+                think=False,
+                stream_to_stdout=False,
+            )
+        except ResponseTruncatedError as exc:
+            # Attempt recovery from whatever JSON Ollama finished before the cutoff.
+            reply = exc.text
+
+        try:
+            candidate_facts = json.loads(_extract_json_array(reply))
+        except (json.JSONDecodeError, ValueError):
+            return
         if not isinstance(candidate_facts, list):
             return
-        existing_embeddings = [fact["embedding"] for fact in get_all_facts(conn)]
-        for fact_text in candidate_facts:
-            if not isinstance(fact_text, str) or not fact_text.strip():
-                continue
-            embedding = ollama_embed(fact_text)
+
+        valid_facts = [f for f in candidate_facts if isinstance(f, str) and f.strip()]
+        if not valid_facts:
+            return
+
+        with _fact_cache_lock:
+            existing_embeddings = [f["embedding"] for f in (_fact_cache or [])]
+
+        # Embed all candidate facts in parallel — each HTTP call is independent.
+        with ThreadPoolExecutor(max_workers=len(valid_facts)) as pool:
+            embeddings = list(pool.map(ollama_embed, valid_facts))
+
+        inserted_any = False
+        for fact_text, embedding in zip(valid_facts, embeddings):
             if is_duplicate_fact(embedding, existing_embeddings):
                 continue
             insert_fact(conn, fact_text, embedding, source_thread)
             existing_embeddings.append(embedding)
+            inserted_any = True
+
+        if inserted_any:
+            with _db_lock:
+                conn.commit()
+
     except Exception as exc:  # extraction must never crash the main loop
         log_extraction_error(exc)
 
 
-def build_system_prompt(relevant_facts, calendar_events=None):
+def build_system_prompt(relevant_facts):
     sections = [
         "You are a helpful assistant talking with the user in their terminal.\n\n"
         f"{current_datetime_context()}\n"
@@ -426,84 +468,14 @@ def build_system_prompt(relevant_facts, calendar_events=None):
     if relevant_facts:
         bullets = "\n".join(f"- {fact['text']}" for fact in relevant_facts)
         sections.append(f"Relevant memory:\n{bullets}")
-    if calendar_events:
-        bullets = "\n".join(
-            f"- {event['title']} ({event['start']} to {event['end']}, {event['calendar']})"
-            for event in calendar_events
-        )
-        sections.append(f"Upcoming calendar events:\n{bullets}")
     return "\n\n".join(sections)
 
 
-def _run_calendar_refresh(calendar_cache: dict) -> None:
-    try:
-        events = ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)
-        calendar_cache["events"] = events
-        calendar_cache["fetched_at"] = datetime.now(timezone.utc)
-    except ochat_calendar.CalendarError as exc:
-        print(f"\nwarning: calendar read failed ({exc}); continuing with last-known events", file=sys.stderr)
-    finally:
-        calendar_cache["refreshing"] = False
-
-
-def refresh_calendar_cache(calendar_cache: dict) -> list[dict]:
-    # fetch_upcoming_events can take well over a minute against large/synced
-    # calendars (Calendar.app's AppleScript "whose" filter is a per-event
-    # round trip, not a native query), so this always returns immediately
-    # with the last-known events and lets a background thread refresh the
-    # cache for the *next* turn -- mirrors the extract_facts daemon pattern.
-    fetched_at = calendar_cache.get("fetched_at")
-    if fetched_at is not None and (datetime.now(timezone.utc) - fetched_at).total_seconds() < CALENDAR_CACHE_TTL_SECONDS:
-        return calendar_cache.get("events", [])
-    if not calendar_cache.get("refreshing"):
-        calendar_cache["refreshing"] = True
-        thread = threading.Thread(target=_run_calendar_refresh, args=(calendar_cache,), daemon=True)
-        calendar_cache["_thread"] = thread
-        thread.start()
-    return calendar_cache.get("events", [])
-
-
-def handle_calendar_create_intent(user_input: str, now_context: str, calendar_cache: dict) -> None:
-    intent_result = classify_calendar_intent(user_input, now_context)
-    if intent_result["intent"] != "create":
-        return
-    title = intent_result.get("title")
-    start_raw = intent_result.get("start")
-    end_raw = intent_result.get("end")
-    if not title or not start_raw or not end_raw:
-        return
-    try:
-        start = datetime.fromisoformat(start_raw)
-        end = datetime.fromisoformat(end_raw)
-    except ValueError:
-        return
-    if end.date() != start.date():
-        end_part = end.strftime("%a, %b %d %Y, %I:%M %p")
-    else:
-        end_part = end.strftime("%I:%M %p")
-    confirm_text = (
-        f'Add to calendar? "{title}" -- '
-        f'{start.strftime("%a, %b %d %Y, %I:%M %p")}-{end_part} [y/N] '
-    )
-    answer = input(confirm_text).strip().lower()
-    if answer not in ("y", "yes"):
-        print("cancelled, nothing was added")
-        return
-    try:
-        ochat_calendar.create_event(title, start, end, intent_result.get("notes"), APPLESCRIPT_TIMEOUT_SECONDS)
-    except ochat_calendar.CalendarError as exc:
-        print(f"error: failed to add event ({exc})", file=sys.stderr)
-        return
-    calendar_cache["events"] = calendar_cache.get("events", []) + [
-        {"title": title, "start": start.isoformat(), "end": end.isoformat(), "calendar": ""}
-    ]
-
-
-def handle_turn(conn, thread, path, user_input, think, calendar_cache=None):
+def handle_turn(conn, thread, path, user_input, think):
     try:
         query_embedding = ollama_embed(user_input)
     except requests.RequestException as exc:
-        print(f"\nerror: chat request failed ({exc}); message not saved, try again", file=sys.stderr)
+        print(f"\nerror: embed request failed ({exc}); message not saved, try again", file=sys.stderr)
         return None
 
     try:
@@ -512,25 +484,18 @@ def handle_turn(conn, thread, path, user_input, think, calendar_cache=None):
         print(f"\nwarning: fact retrieval failed ({exc}); continuing without relevant facts", file=sys.stderr)
         relevant = []
 
-    calendar_events = []
-    if calendar_cache is not None and CALENDAR_ENABLED and ochat_calendar.is_macos():
-        now_context = current_datetime_context()
-        calendar_events = refresh_calendar_cache(calendar_cache)
-        if looks_calendar_related(user_input):
-            handle_calendar_create_intent(user_input, now_context, calendar_cache)
-            calendar_events = calendar_cache.get("events", calendar_events)
-
     try:
-        system_prompt = build_system_prompt(relevant, calendar_events)
+        system_prompt = build_system_prompt(relevant)
         budget = effective_history_budget(system_prompt)
+        think_val = think_param(think)
         window = truncate_messages_to_budget(
             thread["messages"] + [{"role": "user", "content": user_input}], budget
         )
         payload = [{"role": "system", "content": system_prompt}] + window
         print("ochat> ", end="", flush=True)
         try:
-            reply = ollama_chat(payload, think=think_param(think))
-        except ResponseTruncatedError:
+            reply = ollama_chat(payload, think=think_val)
+        except ResponseTruncatedError as exc_first:
             print(
                 "\nwarning: response was cut off (context limit reached); "
                 "retrying with less history...",
@@ -539,17 +504,25 @@ def handle_turn(conn, thread, path, user_input, think, calendar_cache=None):
             retry_window = truncate_messages_to_budget(
                 thread["messages"] + [{"role": "user", "content": user_input}], budget // 2
             )
-            retry_payload = [{"role": "system", "content": system_prompt}] + retry_window
-            print("ochat> ", end="", flush=True)
-            try:
-                reply = ollama_chat(retry_payload, think=think_param(think))
-            except ResponseTruncatedError as exc:
+            if retry_window == window:
+                # Halving the budget produced the same window — a retry cannot help.
                 print(
-                    "\nwarning: response was still cut off after retrying with "
-                    "less history; saving the partial reply",
+                    "\nwarning: history already at minimum; saving partial reply",
                     file=sys.stderr,
                 )
-                reply = exc.text
+                reply = exc_first.text
+            else:
+                retry_payload = [{"role": "system", "content": system_prompt}] + retry_window
+                print("ochat> ", end="", flush=True)
+                try:
+                    reply = ollama_chat(retry_payload, think=think_val)
+                except ResponseTruncatedError as exc:
+                    print(
+                        "\nwarning: response was still cut off after retrying with "
+                        "less history; saving the partial reply",
+                        file=sys.stderr,
+                    )
+                    reply = exc.text
     except requests.RequestException as exc:
         print(f"\nerror: chat request failed ({exc}); message not saved, try again", file=sys.stderr)
         return None
@@ -571,7 +544,6 @@ def run_chat_loop(thread_name: str, think: str) -> None:
     conn = init_db(MEMORY_DB_PATH)
     path = thread_path(thread_name)
     thread = load_thread(path, thread_name)
-    calendar_cache = {"events": [], "fetched_at": None}
     pending_extraction = None
     try:
         while True:
@@ -584,7 +556,7 @@ def run_chat_loop(thread_name: str, think: str) -> None:
                 continue
             if pending_extraction is not None:
                 pending_extraction.join(timeout=0)
-            pending_extraction = handle_turn(conn, thread, path, user_input, think, calendar_cache)
+            pending_extraction = handle_turn(conn, thread, path, user_input, think)
     finally:
         if pending_extraction is not None:
             pending_extraction.join(timeout=EXTRACTION_JOIN_TIMEOUT_SECONDS)
@@ -619,22 +591,6 @@ def cmd_memory_forget(fact_id: int) -> None:
         sys.exit(1)
 
 
-def cmd_calendar_list() -> None:
-    if not ochat_calendar.is_macos():
-        print("calendar features are only supported on macOS", file=sys.stderr)
-        sys.exit(1)
-    try:
-        events = ochat_calendar.fetch_upcoming_events(CALENDAR_LOOKAHEAD_DAYS, APPLESCRIPT_TIMEOUT_SECONDS)
-    except ochat_calendar.CalendarError as exc:
-        print(f"error: failed to read calendar ({exc})", file=sys.stderr)
-        sys.exit(1)
-    if not events:
-        print("no upcoming events")
-        return
-    for event in events:
-        print(f"{event['start']} - {event['end']}  {event['title']}  ({event['calendar']})")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(prog="ochat")
     parser.add_argument("--thread", default="default")
@@ -646,9 +602,6 @@ def main() -> None:
     memory_sub.add_parser("list")
     forget_parser = memory_sub.add_parser("forget")
     forget_parser.add_argument("fact_id", type=int)
-    calendar_parser = subparsers.add_parser("calendar")
-    calendar_sub = calendar_parser.add_subparsers(dest="calendar_command")
-    calendar_sub.add_parser("list")
 
     args = parser.parse_args()
 
@@ -661,11 +614,6 @@ def main() -> None:
             cmd_memory_forget(args.fact_id)
         else:
             memory_parser.print_help()
-    elif args.command == "calendar":
-        if args.calendar_command == "list":
-            cmd_calendar_list()
-        else:
-            calendar_parser.print_help()
     else:
         run_chat_loop(args.thread, args.think)
 
