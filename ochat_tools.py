@@ -395,14 +395,26 @@ def init_tools(
     """
     Initialise the tool registry from config. Returns started MCP clients.
     Call shutdown_tools() on exit to terminate them.
+
+    With no config file (or config={}), registers web_search as a safe
+    default — no dangerous tools, no MCP servers. Set "enabled": false in
+    the config to suppress even the default web_search.
     """
     global _active_clients
     if config is None:
         config = load_config(config_path)
-    if not config.get("enabled", False):
-        return []
 
     clear_registry()
+
+    if not config:
+        # No config file — register web_search as a safe always-on default.
+        register(BUILTIN_TOOLS["web_search"])
+        _active_clients = []
+        return []
+
+    if not config.get("enabled", False):
+        _active_clients = []
+        return []
 
     builtin_cfg = config.get("builtin", None)
     for name, tool in BUILTIN_TOOLS.items():

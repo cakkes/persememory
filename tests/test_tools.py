@@ -453,3 +453,20 @@ def test_shutdown_tools_stops_all_active_clients():
         })
     ochat_tools.shutdown_tools()
     proc.terminate.assert_called_once()
+
+
+def test_init_tools_registers_web_search_by_default_when_no_config_file(tmp_path):
+    # web_search should work out of the box — no config file required.
+    # Dangerous tools (write_file, run_shell) must not be auto-registered.
+    clients = ochat_tools.init_tools(config_path=tmp_path / "nonexistent.json")
+    assert clients == []
+    names = {t.name for t in ochat_tools.all_tools()}
+    assert "web_search" in names
+    assert "write_file" not in names
+    assert "run_shell" not in names
+
+
+def test_init_tools_with_enabled_false_disables_even_default_web_search():
+    # Explicit opt-out via config must suppress the default web_search too.
+    ochat_tools.init_tools(config={"enabled": False})
+    assert ochat_tools.all_tools() == []

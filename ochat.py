@@ -534,9 +534,14 @@ def handle_turn(conn, thread, path, user_input, think):
         if tools_active:
             def _chat_fn(msgs, tools):
                 if tools:
-                    # Tool-detection turn — non-streaming so we can inspect tool_calls
-                    return ollama_chat_raw(msgs, tools=tools, think=think_val)
-                # Final answer turn — stream to stdout as normal
+                    # Tool-detection turn — non-streaming so we can inspect tool_calls.
+                    text, tool_calls = ollama_chat_raw(msgs, tools=tools, think=think_val)
+                    if not tool_calls:
+                        # Model replied directly without calling a tool; print now since
+                        # ollama_chat_raw is non-streaming and produced no visible output.
+                        print(text)
+                    return text, tool_calls
+                # Final answer turn (after one or more tool uses) — stream to stdout.
                 print("ochat> ", end="", flush=True)
                 try:
                     text = ollama_chat(msgs, think=think_val)

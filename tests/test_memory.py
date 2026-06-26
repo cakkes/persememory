@@ -582,3 +582,27 @@ def test_handle_turn_prefixes_user_message_with_datetime_in_payload_but_not_in_t
     assert "current date" in last_user_msg["content"].lower() or "date/time" in last_user_msg["content"].lower()
     # The thread must store the original clean user input, not the dated version
     assert thread["messages"][-2]["content"] == "what day is it?"
+
+
+def test_handle_turn_prints_reply_to_stdout_when_tools_active_and_model_makes_no_tool_calls(tmp_path, capsys):
+    # Bug: when tools are registered, handle_turn uses ollama_chat_raw (non-streaming)
+    # for tool detection. If the model returns no tool_calls, the reply text came from
+    # a non-streaming call and was never printed — the user would see "ochat> " then silence.
+    import ochat_tools
+    ochat_tools.clear_registry()
+    ochat_tools.register(ochat_tools.ToolDef(
+        name="dummy_tool", description="", parameters={},
+        fn=lambda: "result",
+        dangerous=False,
+    ))
+    conn = ochat.init_db(tmp_path / "memory.db")
+    thread = {"name": "t", "messages": []}
+    path = tmp_path / "t.json"
+    with patch("ochat.ollama_embed", return_value=np.array([1.0], dtype=np.float32)), \
+         patch("ochat.ollama_chat_raw", return_value=("hello from model", None)), \
+         patch("ochat.extract_facts"):
+        result = ochat.handle_turn(conn, thread, path, "hi", "off")
+    result.join(timeout=2)
+    ochat_tools.clear_registry()
+    out = capsys.readouterr().out
+    assert "hello from model" in out
